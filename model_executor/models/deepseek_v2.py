@@ -1044,6 +1044,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
+        skipped_weights: list[str] = []
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1108,15 +1109,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                         continue
 
                     if name not in params_dict:
-                        logger.warning(
-                            "Skipping weight %s: not found in model "
-                            "params_dict (possibly indexer or MLA weights "
-                            "not created). Available params with similar "
-                            "prefix: %s",
-                            name,
-                            [k for k in params_dict.keys()
-                             if k.startswith('.'.join(name.split('.')[:-1]))]
-                        )
+                        skipped_weights.append(name)
                         continue
 
                     param = params_dict[name]
@@ -1124,6 +1117,13 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        if skipped_weights:
+            logger.warning(
+                "Skipped %d weights not found in params_dict "
+                "(possibly indexer or MLA weights not created): %s",
+                len(skipped_weights), skipped_weights,
+            )
 
         opt_support_quant_method = ["GGUFLinearMethod", "UnquantizedLinearMethod", "CompressedTensorsW8A8Int8", "AWQMarlinLinearMethod"]
         # add your opt here..
