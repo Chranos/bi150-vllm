@@ -302,6 +302,40 @@ class DeepseekV2Attention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn")
 
+        # DeepSeek V3.2 Indexer support (same as MLAAttention)
+        self.is_v32 = hasattr(config, "index_topk")
+        if self.is_v32:
+            if int(prefix.split(".")[-1]) == 0:
+                logger.warning(
+                    "[DEBUG DeepseekV2Attention] is_v32=%s, "
+                    "vllm_config_is_none=%s, q_lora_rank=%s, "
+                    "topk_indices_buffer_is_none=%s",
+                    self.is_v32, vllm_config is None,
+                    q_lora_rank, topk_indices_buffer is None,
+                )
+            self.indexer_rope_emb = get_rope(
+                qk_rope_head_dim,
+                rotary_dim=qk_rope_head_dim,
+                max_position=max_position_embeddings,
+                base=rope_theta,
+                rope_scaling=rope_scaling,
+                is_neox_style=not getattr(config, "indexer_rope_interleave",
+                                          False),
+            )
+            self.indexer = Indexer(
+                vllm_config,
+                config,
+                hidden_size,
+                q_lora_rank,
+                quant_config,
+                cache_config,
+                topk_indices_buffer,
+                f"{prefix}.indexer",
+            )
+        else:
+            self.indexer_rope_emb = None
+            self.indexer = None
+
     def forward_opt(
         self,
         positions: torch.Tensor,
