@@ -15,7 +15,6 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 import re
-from itertools import chain
 from typing import Iterable, Literal, Optional, Union
 
 import torch
@@ -167,8 +166,8 @@ class TransformersModel(nn.Module):
         # Initialize buffers (e.g. rotary embedding inverse frequency)
         self.init_buffers(self.model)
 
-        # Move remaining meta tensors to device (should happen last)
-        self.meta_to_empty(self.model)
+        # Initialize any parameters that have not had their modules replaced
+        self.init_parameters(self.model)
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
@@ -299,13 +298,32 @@ class TransformersModel(nn.Module):
         for child in module.children():
             self.init_buffers(child)
 
-    def meta_to_empty(self, module: nn.Module):
-        tensors = list(chain(module.buffers(), module.parameters()))
-        if tensors and all(t.device == torch.device("meta") for t in tensors):
-            module.to_empty(device=self.device_config.device)
-            return  # We can stop recursing because to_empty is recursive
-        for child in module.children():
-            self.meta_to_empty(child)
+    def init_parameters(self, module: nn.Module,
+                         dtype: Optional[torch.dtype] = None):
+        """
+        If a `parameter` is on the `meta` device, then its parent
+        `module` is the original module created by:
+
+        ```python
+        with torch.device("meta"):
+            self.model: "PreTrainedModel" = AutoModel.from_config(...)
+        ```
+        """
+
+        def _init_parameters(module: nn.Module, dtype: Optional[torch.dtype]):
+            for name, param in module.named_parameters(recurse=False):
+                if param.device == torch.device("meta"):
+                    new_param = nn.Parameter(
+                        torch.empty_like(
+                            param.data,
+                            dtype=dtype or self.model_config.dtype,
+                            device=self.device_config.device,
+                        ))
+                    setattr(module, name, new_param)
+            for child in module.children():
+                _init_parameters(child, dtype)
+
+        _init_parameters(module, dtype)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.model.get_input_embeddings()
