@@ -850,8 +850,30 @@ class ModelConfig:
                 and self.hf_text_config.kv_lora_rank is not None
         return False
 
+    _head_size_debug_logged = False
+
     def get_head_size(self) -> int:
         # TODO remove hard code
+        if not ModelConfig._head_size_debug_logged:
+            ModelConfig._head_size_debug_logged = True
+            import logging
+            _logger = logging.getLogger(__name__)
+            _model_type = getattr(self.hf_text_config, "model_type", "N/A")
+            _kv_lora_rank = getattr(self.hf_text_config, "kv_lora_rank", None)
+            _qk_rope = getattr(self.hf_text_config, "qk_rope_head_dim", 0)
+            _qk_nope = getattr(self.hf_text_config, "qk_nope_head_dim", 0)
+            _head_dim = getattr(self.hf_text_config, "head_dim", None)
+            _hidden = getattr(self.hf_text_config, "hidden_size", None)
+            _num_heads = getattr(self.hf_text_config, "num_attention_heads", None)
+            _logger.warning(
+                "[DEBUG get_head_size] model_type=%s, is_deepseek_mla=%s, "
+                "use_mla=%s, kv_lora_rank=%s, qk_rope_head_dim=%s, "
+                "qk_nope_head_dim=%s, head_dim=%s, hidden_size=%s, "
+                "num_attention_heads=%s",
+                _model_type, self.is_deepseek_mla, self.use_mla,
+                _kv_lora_rank, _qk_rope, _qk_nope, _head_dim,
+                _hidden, _num_heads,
+            )
         if self.is_deepseek_mla:
             qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
                                        0)
