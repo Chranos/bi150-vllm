@@ -305,7 +305,7 @@ class DeepseekV2Attention(nn.Module):
         # DeepSeek V3.2 Indexer support (same as MLAAttention)
         self.is_v32 = hasattr(config, "index_topk")
         if self.is_v32:
-            if int(prefix.split(".")[-1]) == 0:
+            if int(prefix.split(".")[-2]) == 0:
                 logger.warning(
                     "[DEBUG DeepseekV2Attention] is_v32=%s, "
                     "vllm_config_is_none=%s, q_lora_rank=%s, "
