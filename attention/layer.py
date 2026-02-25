@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer."""
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -9,19 +9,24 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 
 import ixformer.contrib.vllm_flash_attn as ops
 
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
+    from vllm.v1.kv_cache_interface import KVCacheSpec
 
-class Attention(nn.Module):
+
+class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
     This class takes query, key, and value tensors as input. The input tensors
@@ -257,6 +262,42 @@ class Attention(nn.Module):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if hasattr(self.impl, "process_weights_after_loading"):
             self.impl.process_weights_after_loading(act_dtype)
+
+    def get_attn_backend(self) -> type["AttentionBackend"]:
+        """Get the attention backend class for this layer."""
+        from vllm.attention.selector import get_attn_backend as _get_attn_backend
+        return _get_attn_backend(
+            self.head_size,
+            self.dtype,
+            self.kv_cache_dtype,
+            16,  # block_size
+            False,  # is_attention_free
+            False,  # is_blocksparse
+            use_mla=self.use_mla,
+        )
+
+    def get_kv_cache_spec(self, vllm_config: "VllmConfig") -> "KVCacheSpec":
+        """Get the KV cache spec for this layer."""
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+        block_size = vllm_config.cache_config.block_size
+
+        if self.sliding_window is not None:
+            return SlidingWindowSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.dtype,
+                use_mla=self.use_mla,
+                sliding_window=self.sliding_window,
+            )
+        else:
+            return FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.dtype,
+                use_mla=self.use_mla,
+            )
 
 
 class MultiHeadAttention(nn.Module):

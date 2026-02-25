@@ -59,13 +59,13 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     maybe_prefix)
 import ixformer.inference.functions as ops
 
-from vllm.attention.layer import AttentionLayerBase
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import get_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
