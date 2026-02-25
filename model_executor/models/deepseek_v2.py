@@ -513,7 +513,16 @@ class DeepseekV2MLAAttention(nn.Module):
 
         # DeepSeek V3.2 Indexer support
         self.is_v32 = hasattr(config, "index_topk")
-        if self.is_v32 and vllm_config is not None:
+        if self.is_v32 and self.debug_layer_idx == 0:
+            logger.warning(
+                "[DEBUG MLAAttention] layer=%d, is_v32=%s, "
+                "vllm_config_is_none=%s, q_lora_rank=%s, "
+                "topk_indices_buffer_is_none=%s",
+                self.debug_layer_idx, self.is_v32,
+                vllm_config is None, q_lora_rank,
+                topk_indices_buffer is None,
+            )
+        if self.is_v32:
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
                 rotary_dim=qk_rope_head_dim,
