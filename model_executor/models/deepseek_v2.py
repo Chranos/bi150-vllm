@@ -1044,7 +1044,28 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
-        skipped_weights: list[str] = []
+
+        # Debug: print model structure info once
+        indexer_params = [k for k in params_dict if '.indexer.' in k]
+        attn_layers_with_indexer = set(
+            k.rsplit('.indexer.', 1)[0] for k in indexer_params
+        )
+        sample_layer = 'model.layers.56.self_attn'
+        sample_params = [k for k in params_dict if k.startswith(sample_layer)]
+        logger.warning(
+            "[DEBUG load_weights] use_mla=%s, is_v32=%s, "
+            "total_params=%d, indexer_params=%d, "
+            "layers_with_indexer=%s, "
+            "params_under_%s=%s",
+            getattr(self.config, 'use_mla', 'N/A'),
+            hasattr(self.config, 'index_topk'),
+            len(params_dict),
+            len(indexer_params),
+            sorted(attn_layers_with_indexer) if attn_layers_with_indexer else '[]',
+            sample_layer,
+            sample_params,
+        )
+
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1108,22 +1129,11 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                     if is_pp_missing_parameter(name, self):
                         continue
 
-                    if name not in params_dict:
-                        skipped_weights.append(name)
-                        continue
-
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
-        if skipped_weights:
-            logger.warning(
-                "Skipped %d weights not found in params_dict "
-                "(possibly indexer or MLA weights not created): %s",
-                len(skipped_weights), skipped_weights,
-            )
 
         opt_support_quant_method = ["GGUFLinearMethod", "UnquantizedLinearMethod", "CompressedTensorsW8A8Int8", "AWQMarlinLinearMethod"]
         # add your opt here..
