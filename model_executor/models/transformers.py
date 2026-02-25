@@ -147,11 +147,28 @@ class TransformersModel(nn.Module):
                 trust_remote_code=model_config.trust_remote_code,
             )
 
+        # DEBUG: Log model structure
+        logger.info(f"[DEBUG] Model type: {type(self.model)}")
+        logger.info(f"[DEBUG] Model config: num_hidden_layers={getattr(config, 'num_hidden_layers', 'N/A')}, "
+                   f"hidden_size={getattr(config, 'hidden_size', 'N/A')}, "
+                   f"num_attention_heads={getattr(config, 'num_attention_heads', 'N/A')}")
+        logger.info(f"[DEBUG] TP size: {self.tp_size}, PP size: {self.pp_size}")
+
+        # DEBUG: Count total parameters before any replacement
+        total_params = sum(p.numel() for p in self.model.parameters())
+        logger.info(f"[DEBUG] Total model parameters: {total_params:,} ({total_params * 2 / 1024**3:.2f} GB in bf16)")
+
+        logger.info("[DEBUG] Starting pipeline_parallel...")
         self.pipeline_parallel()
+        logger.info("[DEBUG] pipeline_parallel done.")
+
+        logger.info("[DEBUG] Starting tensor_parallel...")
         self.tensor_parallel()
+        logger.info("[DEBUG] tensor_parallel done.")
 
         # Input embeddings
         if not isinstance(self.model.get_input_embeddings(), PPMissingLayer):
+            logger.info("[DEBUG] Replacing input embeddings with VocabParallelEmbedding...")
             self.model.set_input_embeddings(
                 VocabParallelEmbedding(
                     config.vocab_size,
@@ -159,15 +176,22 @@ class TransformersModel(nn.Module):
                     org_num_embeddings=config.vocab_size,
                     quant_config=quant_config,
                 ))
+            logger.info("[DEBUG] Input embeddings replaced.")
 
         # Attention layers
+        logger.info("[DEBUG] Creating attention instances...")
         self.attention_instances = self.create_attention_instances()
+        logger.info(f"[DEBUG] Created {len(self.attention_instances)} attention instances.")
 
         # Initialize buffers (e.g. rotary embedding inverse frequency)
+        logger.info("[DEBUG] Starting init_buffers...")
         self.init_buffers(self.model)
+        logger.info("[DEBUG] init_buffers done.")
 
         # Initialize any parameters that have not had their modules replaced
+        logger.info("[DEBUG] Starting init_parameters...")
         self.init_parameters(self.model)
+        logger.info("[DEBUG] init_parameters done.")
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
@@ -240,6 +264,9 @@ class TransformersModel(nn.Module):
                 f"{type(self.model)} does not have a tensor parallel plan. "
                 "All Linear layers will use ReplicatedLinear.")
 
+        # DEBUG: Count replaced layers
+        replaced_count = {"colwise": 0, "rowwise": 0, "replicate": 0}
+
         def _tensor_parallel(module: nn.Module, prefix: str = ""):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
@@ -257,10 +284,18 @@ class TransformersModel(nn.Module):
                         child_module, style, self.quant_config)
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
+                    # DEBUG: Count and log
+                    replaced_count[style] = replaced_count.get(style, 0) + 1
+                    logger.info(f"[DEBUG TP] Replaced {qual_name}: "
+                               f"{child_module.in_features}x{child_module.out_features} "
+                               f"-> {style}")
                 else:
                     _tensor_parallel(child_module, prefix=qual_name)
 
         _tensor_parallel(self.model)
+
+        # DEBUG: Summary
+        logger.info(f"[DEBUG TP] Replacement summary: {replaced_count}")
 
     def create_attention_instances(self) -> dict[int, Attention]:
         """
@@ -319,19 +354,61 @@ class TransformersModel(nn.Module):
             self.model: "PreTrainedModel" = AutoModel.from_config(...)
         ```
         """
+        # DEBUG: Collect all meta parameters first
+        meta_params = []
+        total_meta_bytes = 0
 
-        def _init_parameters(module: nn.Module, dtype: Optional[torch.dtype]):
-            for name, param in module.named_parameters(recurse=False):
+        def _collect_meta_params(mod: nn.Module, prefix: str = ""):
+            nonlocal total_meta_bytes
+            for name, param in mod.named_parameters(recurse=False):
                 if param.device == torch.device("meta"):
+                    full_name = f"{prefix}.{name}" if prefix else name
+                    param_bytes = param.numel() * param.element_size()
+                    meta_params.append((full_name, param.shape, param_bytes, type(mod).__name__))
+                    total_meta_bytes += param_bytes
+            for child_name, child in mod.named_children():
+                child_prefix = f"{prefix}.{child_name}" if prefix else child_name
+                _collect_meta_params(child, child_prefix)
+
+        _collect_meta_params(module)
+
+        # DEBUG: Log summary
+        logger.info(f"[DEBUG INIT] Found {len(meta_params)} parameters on meta device")
+        logger.info(f"[DEBUG INIT] Total meta parameters size: {total_meta_bytes / 1024**3:.2f} GB")
+
+        # DEBUG: Log top 20 largest parameters
+        meta_params_sorted = sorted(meta_params, key=lambda x: x[2], reverse=True)
+        logger.info("[DEBUG INIT] Top 20 largest meta parameters:")
+        for i, (name, shape, size_bytes, mod_type) in enumerate(meta_params_sorted[:20]):
+            logger.info(f"  {i+1}. {name}: shape={shape}, size={size_bytes/1024**2:.2f} MB, module={mod_type}")
+
+        # DEBUG: Group by module type
+        from collections import defaultdict
+        by_module_type = defaultdict(lambda: {"count": 0, "bytes": 0})
+        for name, shape, size_bytes, mod_type in meta_params:
+            by_module_type[mod_type]["count"] += 1
+            by_module_type[mod_type]["bytes"] += size_bytes
+        logger.info("[DEBUG INIT] Meta parameters by module type:")
+        for mod_type, info in sorted(by_module_type.items(), key=lambda x: x[1]["bytes"], reverse=True):
+            logger.info(f"  {mod_type}: count={info['count']}, total={info['bytes']/1024**3:.2f} GB")
+
+        def _init_parameters(mod: nn.Module, dtype: Optional[torch.dtype], prefix: str = ""):
+            for name, param in mod.named_parameters(recurse=False):
+                if param.device == torch.device("meta"):
+                    full_name = f"{prefix}.{name}" if prefix else name
+                    param_bytes = param.numel() * param.element_size()
+                    logger.info(f"[DEBUG INIT] Allocating {full_name}: "
+                               f"shape={param.shape}, size={param_bytes/1024**2:.2f} MB")
                     new_param = nn.Parameter(
                         torch.empty_like(
                             param.data,
                             dtype=dtype or self.model_config.dtype,
                             device=self.device_config.device,
                         ))
-                    setattr(module, name, new_param)
-            for child in module.children():
-                _init_parameters(child, dtype)
+                    setattr(mod, name, new_param)
+            for child_name, child in mod.named_children():
+                child_prefix = f"{prefix}.{child_name}" if prefix else child_name
+                _init_parameters(child, dtype, child_prefix)
 
         _init_parameters(module, dtype)
 
