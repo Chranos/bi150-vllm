@@ -227,26 +227,36 @@ class TransformersModel(nn.Module):
         """
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
+
+        All nn.Linear layers will be replaced with vLLM's linear classes:
+        - Layers matching tp_plan patterns use the specified style (colwise/rowwise)
+        - Unmatched layers use ReplicatedLinear to ensure proper weight loading
         """
-        if not self.model.supports_tp_plan:
-            if self.tp_size <= 1:
-                return
+        # Get tp_plan, default to empty dict if not supported
+        tp_plan = getattr(self.model, '_tp_plan', None) or {}
 
-            raise ValueError(
-                f"{type(self.model)} does not support tensor parallel yet!")
-
-        tp_plan = self.model._tp_plan
+        if not tp_plan and self.tp_size > 1:
+            logger.warning(
+                f"{type(self.model)} does not have a tensor parallel plan. "
+                "All Linear layers will use ReplicatedLinear.")
 
         def _tensor_parallel(module: nn.Module, prefix: str = ""):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
-                for pattern, style in tp_plan.items():
-                    if re.match(pattern, qual_name) and isinstance(
-                            child_module, nn.Linear):
-                        new_module = replace_linear_class(
-                            child_module, style, self.quant_config)
-                        setattr(module, child_name, new_module)
-                        log_replacement(qual_name, child_module, new_module)
+                if isinstance(child_module, nn.Linear):
+                    # Find matching pattern in tp_plan
+                    matched_style = None
+                    for pattern, style in tp_plan.items():
+                        if re.match(pattern, qual_name):
+                            matched_style = style
+                            break
+                    # Use "replicate" for unmatched Linear layers to ensure
+                    # all Linear layers are replaced with vLLM's implementation
+                    style = matched_style if matched_style else "replicate"
+                    new_module = replace_linear_class(
+                        child_module, style, self.quant_config)
+                    setattr(module, child_name, new_module)
+                    log_replacement(qual_name, child_module, new_module)
                 else:
                     _tensor_parallel(child_module, prefix=qual_name)
 
