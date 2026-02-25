@@ -358,10 +358,22 @@ class DeepseekV2Attention(nn.Module):
         kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v_nope = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
+        # Use standard PyTorch ops instead of ixformer ops for debugging
+        # Apply RoPE using standard rotary_emb
+        # k_pe is 2D [num_tokens, rope_dim], need unsqueeze for rotary_emb
+        q_pe, k_pe_rope = self.rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+        # Write back RoPE results
+        q[..., self.qk_nope_head_dim:] = q_pe
+
+        # Assemble k: [k_nope | k_pe_rope]
         k = torch.empty_like(q)
-        v = torch.empty_like(q)
-        ops.mla_rope(positions, q_pe, k_pe, k[...,self.qk_nope_head_dim:], self.rotary_emb.cos_sin_cache)
-        ops.mla_copy_kv(k_nope, v_nope, k, v)
+        k[..., :self.qk_nope_head_dim] = k_nope
+        k[..., self.qk_nope_head_dim:] = k_pe_rope  # broadcasts from [n,1,rope] to [n,heads,rope]
+
+        # Assemble v: pad to qk_head_dim if needed
+        v = torch.nn.functional.pad(
+            v_nope, [0, self.qk_head_dim - self.v_head_dim], value=0
+        )
 
         if not hasattr(DeepseekV2Attention, '_debug_fwd_logged'):
             DeepseekV2Attention._debug_fwd_logged = True
