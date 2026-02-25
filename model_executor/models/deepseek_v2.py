@@ -358,34 +358,10 @@ class DeepseekV2Attention(nn.Module):
         kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v_nope = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # Use standard PyTorch ops instead of ixformer ops for debugging
-        # Apply RoPE using standard rotary_emb
-        # k_pe is 2D [num_tokens, rope_dim], need unsqueeze for rotary_emb
-        q_pe, k_pe_rope = self.rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-        # Write back RoPE results
-        q[..., self.qk_nope_head_dim:] = q_pe
-
-        # Assemble k: [k_nope | k_pe_rope]
         k = torch.empty_like(q)
-        k[..., :self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim:] = k_pe_rope  # broadcasts from [n,1,rope] to [n,heads,rope]
-
-        # Assemble v: pad to qk_head_dim if needed
-        v = torch.nn.functional.pad(
-            v_nope, [0, self.qk_head_dim - self.v_head_dim], value=0
-        )
-
-        if not hasattr(DeepseekV2Attention, '_debug_fwd_logged'):
-            DeepseekV2Attention._debug_fwd_logged = True
-            logger.warning(
-                "[DEBUG forward_opt] q.shape=%s, k.shape=%s, v.shape=%s, "
-                "num_local_heads=%d, qk_head_dim=%d, v_head_dim=%d, "
-                "qk_nope_head_dim=%d, qk_rope_head_dim=%d",
-                q.shape, k.shape, v.shape,
-                self.num_local_heads, self.qk_head_dim,
-                self.v_head_dim, self.qk_nope_head_dim,
-                self.qk_rope_head_dim,
-            )
+        v = torch.empty_like(q)
+        ops.mla_rope(positions, q_pe, k_pe, k[...,self.qk_nope_head_dim:], self.rotary_emb.cos_sin_cache)
+        ops.mla_copy_kv(k_nope, v_nope, k, v)
 
         attn_output = self.attn(q, k, v)
         attn_output = attn_output.view(
@@ -1014,8 +990,42 @@ class DeepseekV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        # Debug: check embedding output (once)
+        if not hasattr(DeepseekV2Model, '_debug_fwd_count'):
+            DeepseekV2Model._debug_fwd_count = 0
+        if DeepseekV2Model._debug_fwd_count == 0:
+            logger.warning(
+                "[DIAG embedding] shape=%s, dtype=%s, "
+                "mean=%.6f, std=%.6f, min=%.6f, max=%.6f, "
+                "has_nan=%s, has_inf=%s, input_ids=%s",
+                hidden_states.shape, hidden_states.dtype,
+                hidden_states.float().mean().item(),
+                hidden_states.float().std().item(),
+                hidden_states.float().min().item(),
+                hidden_states.float().max().item(),
+                torch.isnan(hidden_states).any().item(),
+                torch.isinf(hidden_states).any().item(),
+                input_ids[:20] if input_ids is not None else "None",
+            )
+
+        for i, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            # Debug: check after first and last layer (once)
+            if DeepseekV2Model._debug_fwd_count == 0 and i in (0, len(self.layers) - 1):
+                logger.warning(
+                    "[DIAG layer_%d] hidden: mean=%.6f, std=%.6f, "
+                    "min=%.6f, max=%.6f, nan=%s, inf=%s | "
+                    "residual: mean=%.6f, std=%.6f",
+                    i,
+                    hidden_states.float().mean().item(),
+                    hidden_states.float().std().item(),
+                    hidden_states.float().min().item(),
+                    hidden_states.float().max().item(),
+                    torch.isnan(hidden_states).any().item(),
+                    torch.isinf(hidden_states).any().item(),
+                    residual.float().mean().item() if residual is not None else 0,
+                    residual.float().std().item() if residual is not None else 0,
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -1024,6 +1034,21 @@ class DeepseekV2Model(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        # Debug: check after final norm (once)
+        if DeepseekV2Model._debug_fwd_count == 0:
+            logger.warning(
+                "[DIAG final_norm] shape=%s, mean=%.6f, std=%.6f, "
+                "min=%.6f, max=%.6f, nan=%s, inf=%s",
+                hidden_states.shape,
+                hidden_states.float().mean().item(),
+                hidden_states.float().std().item(),
+                hidden_states.float().min().item(),
+                hidden_states.float().max().item(),
+                torch.isnan(hidden_states).any().item(),
+                torch.isinf(hidden_states).any().item(),
+            )
+        DeepseekV2Model._debug_fwd_count += 1
         return hidden_states
 
 
@@ -1069,6 +1094,26 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
+        # Debug: check logits distribution (once)
+        if not hasattr(DeepseekV2ForCausalLM, '_debug_logits_count'):
+            DeepseekV2ForCausalLM._debug_logits_count = 0
+        if DeepseekV2ForCausalLM._debug_logits_count == 0 and logits is not None:
+            top_vals, top_ids = torch.topk(logits[0], k=10)
+            logger.warning(
+                "[DIAG logits] shape=%s, dtype=%s, "
+                "mean=%.6f, std=%.6f, min=%.6f, max=%.6f, "
+                "nan=%s, inf=%s, "
+                "top10_ids=%s, top10_vals=%s",
+                logits.shape, logits.dtype,
+                logits.float().mean().item(),
+                logits.float().std().item(),
+                logits.float().min().item(),
+                logits.float().max().item(),
+                torch.isnan(logits).any().item(),
+                torch.isinf(logits).any().item(),
+                top_ids.tolist(), top_vals.tolist(),
+            )
+        DeepseekV2ForCausalLM._debug_logits_count += 1
         return logits
 
     def sample(
