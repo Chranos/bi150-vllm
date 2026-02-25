@@ -123,6 +123,24 @@ class SlidingWindowSpec(AttentionSpec):
         return (cdiv(num_tokens, self.block_size) + 1) * (self.page_size_bytes + self.scale_page_size_bytes)
 
 
+class MLAAttentionSpec(FullAttentionSpec):
+    """MLA (Multi-head Latent Attention) KV cache spec.
+
+    For MLA, we only store a single latent vector instead of K + V.
+    This class inherits from FullAttentionSpec and defaults use_mla=True.
+    """
+
+    def __init__(self, block_size: int, num_kv_heads: int, head_size: int,
+                 dtype: torch.dtype, use_mla: bool = True):
+        # MLA always uses use_mla=True
+        super().__init__(block_size=block_size, num_kv_heads=num_kv_heads,
+                         head_size=head_size, dtype=dtype, use_mla=True)
+
+    @property
+    def type_id(self) -> str:
+        return f"mla_attention_{self.block_size}_{self.page_size_bytes}"
+
+
 @dataclass
 class KVCacheTensor:
     """
