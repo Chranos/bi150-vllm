@@ -363,13 +363,25 @@ class DeepseekV2Attention(nn.Module):
         ops.mla_rope(positions, q_pe, k_pe, k[...,self.qk_nope_head_dim:], self.rotary_emb.cos_sin_cache)
         ops.mla_copy_kv(k_nope, v_nope, k, v)
 
+        if not hasattr(DeepseekV2Attention, '_debug_fwd_logged'):
+            DeepseekV2Attention._debug_fwd_logged = True
+            logger.warning(
+                "[DEBUG forward_opt] q.shape=%s, k.shape=%s, v.shape=%s, "
+                "num_local_heads=%d, qk_head_dim=%d, v_head_dim=%d, "
+                "qk_nope_head_dim=%d, qk_rope_head_dim=%d",
+                q.shape, k.shape, v.shape,
+                self.num_local_heads, self.qk_head_dim,
+                self.v_head_dim, self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+            )
+
         attn_output = self.attn(q, k, v)
         attn_output = attn_output.view(
             -1, self.num_local_heads, self.qk_head_dim)[..., :self.v_head_dim].reshape(
                 -1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
         return output
-    
+
     def forward(
         self,
         positions: torch.Tensor,

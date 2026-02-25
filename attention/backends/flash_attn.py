@@ -77,7 +77,7 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, num_kv_heads, block_size, head_size)
+        return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -743,6 +743,20 @@ class FlashAttentionImpl(AttentionImpl):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory
                 # profiling run.
+                if not hasattr(FlashAttentionImpl, '_debug_cache_logged'):
+                    FlashAttentionImpl._debug_cache_logged = True
+                    logger.warning(
+                        "[DEBUG flash_attn] reshape_and_cache_flash: "
+                        "key.shape=%s, value.shape=%s, "
+                        "key_cache.shape=%s, value_cache.shape=%s, "
+                        "kv_cache.shape=%s, slot_mapping.shape=%s, "
+                        "kv_cache_dtype=%s",
+                        key.shape, value.shape,
+                        kv_cache[0].shape, kv_cache[1].shape,
+                        kv_cache.shape,
+                        updated_slot_mapping.flatten().shape,
+                        kv_cache_dtype,
+                    )
                 ops.reshape_and_cache_flash(
                     key,
                     value,
