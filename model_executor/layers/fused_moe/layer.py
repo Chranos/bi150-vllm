@@ -439,6 +439,11 @@ class FusedMoE(torch.nn.Module):
                         if self.dp_size == 1 else get_dp_group().rank_in_group)
         self.global_num_experts = num_experts
 
+        # Save original tp_size for intermediate_size sharding calculation
+        # In EP mode, experts are sharded by ep_size, but intermediate_size
+        # is still sharded by the original tp_size
+        original_tp_size_for_sharding = self.tp_size
+
         # Use expert parallelism instead of tensor parallelism?
         vllm_config = get_current_vllm_config()
         use_ep = (vllm_config.parallel_config.enable_expert_parallel
@@ -479,8 +484,19 @@ class FusedMoE(torch.nn.Module):
 
         self.hidden_size = hidden_size
         self.num_experts = num_experts
-        assert intermediate_size % self.tp_size == 0
-        self.intermediate_size_per_partition = intermediate_size // self.tp_size
+        # Use the original tp_size for intermediate_size sharding
+        # to ensure correct memory allocation in EP mode
+        assert intermediate_size % original_tp_size_for_sharding == 0
+        self.intermediate_size_per_partition = intermediate_size // original_tp_size_for_sharding
+
+        # Debug logging to verify EP fix
+        logger.info(
+            f"FusedMoE: use_ep={use_ep}, local_num_experts={self.local_num_experts}, "
+            f"global_num_experts={self.global_num_experts}, ep_size={self.ep_size}, "
+            f"tp_size={self.tp_size}, original_tp_size={original_tp_size_for_sharding}, "
+            f"intermediate_size_per_partition={self.intermediate_size_per_partition}"
+        )
+
         self.reduce_results = reduce_results
         self.renormalize = renormalize
         self.use_grouped_topk = use_grouped_topk
