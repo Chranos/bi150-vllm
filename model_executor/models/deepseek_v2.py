@@ -877,6 +877,11 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        if not hasattr(DeepseekV2DecoderLayer, '_debug_nan_found'):
+            DeepseekV2DecoderLayer._debug_nan_found = False
+
+        input_has_nan = torch.isnan(hidden_states).any().item()
+
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -884,24 +889,47 @@ class DeepseekV2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
+        attn_has_nan = torch.isnan(hidden_states).any().item()
+
         # Fully Connected
         if isinstance(self.mlp, DeepseekV2MoE) and \
             hidden_states.dtype == torch.float16:
-            # This is a special case to avoid FP16 overflow
             hidden_states *= 1. / self.routed_scaling_factor
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+
+        pre_mlp_nan = torch.isnan(hidden_states).any().item()
+
         hidden_states = self.mlp(hidden_states)
+
+        mlp_has_nan = torch.isnan(hidden_states).any().item()
+
         if isinstance(self.mlp, DeepseekV2MLP) and \
             hidden_states.dtype == torch.float16:
-            # This is a special case to avoid FP16 overflow
             hidden_states *= 1. / self.routed_scaling_factor
             residual *= 1. / self.routed_scaling_factor
+
+        # Log once when NaN first appears in this layer
+        if not DeepseekV2DecoderLayer._debug_nan_found and \
+                not input_has_nan and (attn_has_nan or mlp_has_nan):
+            DeepseekV2DecoderLayer._debug_nan_found = True
+            logger.warning(
+                "[DIAG LAYER INTERNAL] NaN origin: "
+                "input_nan=%s, after_attn_nan=%s, "
+                "pre_mlp_nan=%s, after_mlp_nan=%s, "
+                "mlp_type=%s, layer_prefix=%s",
+                input_has_nan, attn_has_nan,
+                pre_mlp_nan, mlp_has_nan,
+                type(self.mlp).__name__,
+                getattr(self, '_prefix', 'unknown'),
+            )
+
         return hidden_states, residual
 
 
@@ -1008,36 +1036,20 @@ class DeepseekV2Model(nn.Module):
                 input_ids[:20] if input_ids is not None else "None",
             )
 
-        _first_nan_layer = -1
+        _layer_status = []
         for i, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
             hidden_states, residual = layer(positions, hidden_states, residual)
-            # Debug: check every layer on first forward pass
             if DeepseekV2Model._debug_fwd_count == 0:
                 has_nan = torch.isnan(hidden_states).any().item()
                 has_inf = torch.isinf(hidden_states).any().item()
-                if i == 0 or has_nan or has_inf or i == len(self.layers) - 1:
-                    logger.warning(
-                        "[DIAG layer_%d] hidden: mean=%.6f, std=%.6f, "
-                        "min=%.6f, max=%.6f, nan=%s, inf=%s | "
-                        "residual: nan=%s, inf=%s",
-                        i,
-                        hidden_states.float().mean().item(),
-                        hidden_states.float().std().item(),
-                        hidden_states.float().min().item(),
-                        hidden_states.float().max().item(),
-                        has_nan, has_inf,
-                        torch.isnan(residual).any().item() if residual is not None else False,
-                        torch.isinf(residual).any().item() if residual is not None else False,
-                    )
-                if has_nan and _first_nan_layer == -1:
-                    _first_nan_layer = i
-                    logger.warning(
-                        "[DIAG NaN FOUND] First NaN at layer %d! "
-                        "Checking layer type: has_mlp=%s, has_attn=%s",
-                        i,
-                        hasattr(layer, 'mlp'),
-                        hasattr(layer, 'self_attn'),
-                    )
+                status = "OK"
+                if has_nan:
+                    status = "NaN"
+                elif has_inf:
+                    status = "Inf"
+                _layer_status.append(f"{i}:{status}")
+        if DeepseekV2Model._debug_fwd_count == 0:
+            logger.warning("[DIAG layers] %s", " ".join(_layer_status))
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
