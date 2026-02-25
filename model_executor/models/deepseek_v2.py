@@ -217,6 +217,8 @@ class DeepseekV2Attention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        vllm_config: Optional[VllmConfig] = None,
+        topk_indices_buffer: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
