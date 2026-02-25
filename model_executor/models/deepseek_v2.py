@@ -165,12 +165,21 @@ class DeepseekV2MoE(nn.Module):
         self.add_shared_on_experts = quant_config.__class__.__name__ != "GGUFConfig" and config.n_shared_experts is not None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not hasattr(DeepseekV2MoE, '_debug_moe_nan_found'):
+            DeepseekV2MoE._debug_moe_nan_found = False
+
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        input_has_nan = torch.isnan(hidden_states).any().item()
+
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
+        shared_nan = torch.isnan(shared_output).any().item() if self.n_shared_experts is not None else False
+
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+        router_nan = torch.isnan(router_logits).any().item()
+
         if self.add_shared_on_experts:
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
@@ -184,9 +193,29 @@ class DeepseekV2MoE(nn.Module):
                 router_logits=router_logits) * self.routed_scaling_factor
             if self.n_shared_experts is not None:
                 final_hidden_states = final_hidden_states + shared_output
+
+        experts_nan = torch.isnan(final_hidden_states).any().item()
+
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
+
+        allreduce_nan = torch.isnan(final_hidden_states).any().item()
+
+        if not DeepseekV2MoE._debug_moe_nan_found and \
+                not input_has_nan and (experts_nan or allreduce_nan):
+            DeepseekV2MoE._debug_moe_nan_found = True
+            logger.warning(
+                "[DIAG MoE INTERNAL] input_nan=%s, shared_nan=%s, "
+                "router_nan=%s, experts_nan=%s, allreduce_nan=%s, "
+                "router_logits: min=%.4f, max=%.4f, "
+                "add_shared_on_experts=%s, tp_size=%d",
+                input_has_nan, shared_nan,
+                router_nan, experts_nan, allreduce_nan,
+                router_logits.float().min().item(),
+                router_logits.float().max().item(),
+                self.add_shared_on_experts, self.tp_size,
+            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
             
