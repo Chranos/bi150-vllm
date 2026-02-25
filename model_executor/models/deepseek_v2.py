@@ -1107,6 +1107,18 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                     if is_pp_missing_parameter(name, self):
                         continue
 
+                    if name not in params_dict:
+                        logger.warning(
+                            "Skipping weight %s: not found in model "
+                            "params_dict (possibly indexer or MLA weights "
+                            "not created). Available params with similar "
+                            "prefix: %s",
+                            name,
+                            [k for k in params_dict.keys()
+                             if k.startswith('.'.join(name.split('.')[:-1]))]
+                        )
+                        continue
+
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
