@@ -1195,19 +1195,24 @@ def get_rope(
                                                     scaling_factor, dtype,
                                                     **extra_kwargs)
         elif scaling_type == "deepseek_yarn":
-            scaling_factor = rope_scaling["factor"]
-            original_max_position = rope_scaling[
-                "original_max_position_embeddings"]
-            # assert max_position == original_max_position * scaling_factor
-            extra_kwargs = {
-                k: v
-                for k, v in rope_scaling.items()
-                if k in ("extrapolation_factor", "attn_factor", "beta_fast",
-                         "beta_slow", "mscale", "mscale_all_dim")
-            }
-            rotary_emb = DeepseekScalingRotaryEmbedding(
-                head_size, rotary_dim, original_max_position, base,
-                is_neox_style, scaling_factor, dtype, **extra_kwargs)
+            # If factor is not provided, fall back to default RotaryEmbedding
+            if "factor" not in rope_scaling:
+                rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position,
+                                             base, is_neox_style, dtype)
+            else:
+                scaling_factor = rope_scaling["factor"]
+                original_max_position = rope_scaling[
+                    "original_max_position_embeddings"]
+                # assert max_position == original_max_position * scaling_factor
+                extra_kwargs = {
+                    k: v
+                    for k, v in rope_scaling.items()
+                    if k in ("extrapolation_factor", "attn_factor", "beta_fast",
+                             "beta_slow", "mscale", "mscale_all_dim")
+                }
+                rotary_emb = DeepseekScalingRotaryEmbedding(
+                    head_size, rotary_dim, original_max_position, base,
+                    is_neox_style, scaling_factor, dtype, **extra_kwargs)
         elif scaling_type == "longrope":
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
