@@ -888,7 +888,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 self._v_up_proj_and_o_proj = functools.partial(_v_up_proj_and_o_proj_w4a16, self)
                 self._q_proj_and_k_up_proj = functools.partial(_q_proj_and_k_up_proj_w4a16, self)
             else:
-                print(f"Custom MLA for quant method: {layer.quant_method.__class__.__name__} is not supported, will use the vllm official impl.")
+                if not getattr(MLACommonImpl, '_mla_quant_warned', False):
+                    MLACommonImpl._mla_quant_warned = True
+                    print(f"Custom MLA for quant method: {layer.quant_method.__class__.__name__} is not supported, will use the vllm official impl.")
                 back_to_vllm = True
         else:
             back_to_vllm = True
