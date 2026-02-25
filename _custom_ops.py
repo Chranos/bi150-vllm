@@ -1173,6 +1173,9 @@ def reshape_and_cache(
     raise NotImplementedError("Do not use this in our implement")
 
 
+_reshape_cache_debug_logged = False
+
+
 def reshape_and_cache_flash(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -1183,6 +1186,22 @@ def reshape_and_cache_flash(
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
 ) -> None:
+    global _reshape_cache_debug_logged
+    if not _reshape_cache_debug_logged:
+        _reshape_cache_debug_logged = True
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "[DEBUG reshape_and_cache_flash] "
+            "key.shape=%s, key.stride(0)=%d, "
+            "value.shape=%s, value.stride(0)=%d, "
+            "key_cache.shape=%s, value_cache.shape=%s, "
+            "slot_mapping.shape=%s, kv_cache_dtype=%s",
+            key.shape, key.stride(0),
+            value.shape, value.stride(0),
+            key_cache.shape, value_cache.shape,
+            slot_mapping.shape, kv_cache_dtype,
+        )
     ops.reshape_and_cache_flash(key, value, key_cache,
                                 value_cache, slot_mapping,
                                 kv_cache_dtype, 1.0, 1.0)
