@@ -216,6 +216,42 @@ class RMSNorm(CustomOp):
 
 
 @CustomOp.register("gemma_rms_norm")
+class LayerNorm(nn.Module):
+    """Standard Layer Normalization (uses mean and variance, not RMS).
+
+    Used by DeepSeek V3.2 Indexer's k_norm layer.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        if dtype is not None:
+            self.weight = nn.Parameter(torch.ones(hidden_size, dtype=dtype))
+            self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=dtype))
+        else:
+            self.weight = nn.Parameter(torch.ones(hidden_size))
+            self.bias = nn.Parameter(torch.zeros(hidden_size))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply layer normalization."""
+        return torch.nn.functional.layer_norm(
+            x.float(),
+            (self.hidden_size,),
+            self.weight.float(),
+            self.bias.float(),
+            self.eps,
+        ).type_as(x)
+
+    def extra_repr(self) -> str:
+        return f"hidden_size={self.hidden_size}, eps={self.eps}"
+
+
 class GemmaRMSNorm(CustomOp):
     """RMS normalization for Gemma.
 

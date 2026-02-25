@@ -400,6 +400,10 @@ class FusedMoE(torch.nn.Module):
         quant_config: Quantization configure.
     """
 
+    # Class-level counter to limit debug logging
+    _debug_log_count = 0
+    _max_debug_logs = 1
+
     def __init__(
         self,
         num_experts: int,  # Global number of experts
@@ -489,13 +493,15 @@ class FusedMoE(torch.nn.Module):
         assert intermediate_size % original_tp_size_for_sharding == 0
         self.intermediate_size_per_partition = intermediate_size // original_tp_size_for_sharding
 
-        # Debug logging to verify EP fix
-        logger.info(
-            f"FusedMoE: use_ep={use_ep}, local_num_experts={self.local_num_experts}, "
-            f"global_num_experts={self.global_num_experts}, ep_size={self.ep_size}, "
-            f"tp_size={self.tp_size}, original_tp_size={original_tp_size_for_sharding}, "
-            f"intermediate_size_per_partition={self.intermediate_size_per_partition}"
-        )
+        # Debug logging to verify EP fix (only log once)
+        if FusedMoE._debug_log_count < FusedMoE._max_debug_logs:
+            logger.info(
+                f"FusedMoE: use_ep={use_ep}, local_num_experts={self.local_num_experts}, "
+                f"global_num_experts={self.global_num_experts}, ep_size={self.ep_size}, "
+                f"tp_size={self.tp_size}, original_tp_size={original_tp_size_for_sharding}, "
+                f"intermediate_size_per_partition={self.intermediate_size_per_partition}"
+            )
+            FusedMoE._debug_log_count += 1
 
         self.reduce_results = reduce_results
         self.renormalize = renormalize

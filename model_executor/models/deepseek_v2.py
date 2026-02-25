@@ -36,7 +36,7 @@ from vllm.distributed import (get_pp_group,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm, LayerNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                ReplicatedLinear,
@@ -58,6 +58,17 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 import ixformer.inference.functions as ops
+
+from vllm.attention.layer import AttentionLayerBase
+from vllm.attention.backends.abstract import AttentionBackend
+from vllm.config import get_current_vllm_config
+from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 QUANT_CONFIG_FOR_GGUF = None
 from torch.cuda import profiler
 
@@ -362,7 +373,7 @@ class DeepseekV2MLAAttention(nn.Module):
     """
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
     (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
-    
+
     For more info see MLACommonImpl in: vllm/attention/backends/mla/utils.py
     """
 
@@ -382,6 +393,8 @@ class DeepseekV2MLAAttention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        vllm_config: Optional[VllmConfig] = None,
+        topk_indices_buffer: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -496,6 +509,31 @@ class DeepseekV2MLAAttention(nn.Module):
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
 
+        # DeepSeek V3.2 Indexer support
+        self.is_v32 = hasattr(config, "index_topk")
+        if self.is_v32 and vllm_config is not None:
+            self.indexer_rope_emb = get_rope(
+                qk_rope_head_dim,
+                rotary_dim=qk_rope_head_dim,
+                max_position=max_position_embeddings,
+                base=rope_theta,
+                rope_scaling=rope_scaling,
+                is_neox_style=not getattr(config, "indexer_rope_interleave", False),
+            )
+            self.indexer = Indexer(
+                vllm_config,
+                config,
+                hidden_size,
+                q_lora_rank,
+                quant_config,
+                cache_config,
+                topk_indices_buffer,
+                f"{prefix}.indexer",
+            )
+        else:
+            self.indexer_rope_emb = None
+            self.indexer = None
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -504,8 +542,14 @@ class DeepseekV2MLAAttention(nn.Module):
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
             kv_a, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split([self.kv_lora_rank, self.qk_rope_head_dim], dim=1)
-            q = self.q_a_layernorm(q)
+            qr = self.q_a_layernorm(q)  # Save for indexer before q_b_proj
             kv_a = self.kv_a_layernorm(kv_a)
+
+            # Call indexer if V3.2 (before q_b_proj)
+            if self.is_v32 and self.indexer is not None:
+                self.indexer(hidden_states, qr, positions, self.indexer_rope_emb)
+
+            q = qr  # Use normalized q for mla_attn
         else:
             q = hidden_states
             latent_kpe = self.kv_a_proj_with_mqa(hidden_states)[0]
@@ -522,8 +566,14 @@ class DeepseekV2MLAAttention(nn.Module):
         if self.q_lora_rank is not None:
             q_latent_kpe = self.q_a_proj(hidden_states)[0]
             q, kv_a, k_pe, _ = q_latent_kpe.split([self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim, self.q_a_proj.output_padding_size], dim=1)
-            q = self.q_a_layernorm(q)
+            qr = self.q_a_layernorm(q)  # Save for indexer
             kv_a = self.kv_a_layernorm(kv_a)
+
+            # Call indexer if V3.2
+            if self.is_v32 and self.indexer is not None:
+                self.indexer(hidden_states, qr, positions, self.indexer_rope_emb)
+
+            q = qr
         else:
             q = hidden_states
             latent_kpe = self.kv_a_proj_with_mqa(hidden_states)[0]
@@ -531,6 +581,182 @@ class DeepseekV2MLAAttention(nn.Module):
             kv_a = self.kv_a_layernorm(kv_a)
 
         return self.mla_attn(q, kv_a, k_pe)
+
+
+class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
+    """KV cache for DeepSeek V3.2 Indexer.
+
+    For BI150: Uses bf16 directly instead of FP8 packing.
+    """
+
+    _debug_log_count = 0
+
+    def __init__(
+        self, head_dim: int, dtype: torch.dtype, prefix: str, cache_config: CacheConfig
+    ):
+        super().__init__()
+        self.kv_cache = [torch.tensor([])]
+        self.head_dim = head_dim
+        self.prefix = prefix
+        self.cache_config = cache_config
+        self.dtype = dtype
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
+        if DeepseekV32IndexerCache._debug_log_count == 0:
+            logger.info(
+                "[IndexerCache] Registered: prefix=%s, head_dim=%d, dtype=%s",
+                prefix, head_dim, dtype,
+            )
+            DeepseekV32IndexerCache._debug_log_count += 1
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        return MLAAttentionSpec(  # Only has one vector instead of K + V
+            block_size=self.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_dim,
+            dtype=self.dtype,
+        )
+
+    def forward(self): ...
+
+    def get_attn_backend(self) -> AttentionBackend:
+        return DeepseekV32IndexerBackend
+
+
+class Indexer(nn.Module):
+    """DeepSeek V3.2 Sparse Attention Indexer.
+
+    For BI150: Uses bf16 instead of FP8 quantization.
+    """
+
+    _debug_log_count = 0
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        config: PretrainedConfig,
+        hidden_size: int,
+        q_lora_rank: int,
+        quant_config: Optional[QuantizationConfig],
+        cache_config: Optional[CacheConfig],
+        topk_indices_buffer: Optional[torch.Tensor],
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.vllm_config = vllm_config
+        self.config = config
+        self.topk_tokens = config.index_topk
+        self.n_head = config.index_n_heads  # 64
+        self.head_dim = config.index_head_dim  # 128
+        self.rope_dim = config.qk_rope_head_dim  # 64
+        self.q_lora_rank = q_lora_rank  # 1536
+
+        # No tensor parallel, just replicated
+        self.wq_b = ReplicatedLinear(
+            self.q_lora_rank,
+            self.head_dim * self.n_head,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wq_b",
+        )
+        self.wk = ReplicatedLinear(
+            hidden_size,
+            self.head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wk",
+        )
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.weights_proj = ReplicatedLinear(
+            hidden_size,
+            self.n_head,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.weights_proj",
+        )
+        self.softmax_scale = self.head_dim**-0.5
+
+        # BI150: No FP8 quantization, use bf16 directly
+        self.topk_indices_buffer = topk_indices_buffer
+
+        # BI150: Use bf16 cache instead of FP8 packed cache
+        self.k_cache = DeepseekV32IndexerCache(
+            head_dim=self.head_dim,  # No FP8 scale packing
+            dtype=torch.bfloat16,  # Use bf16 instead of uint8
+            prefix=f"{prefix}.k_cache",
+            cache_config=cache_config,
+        )
+        self.max_model_len = vllm_config.model_config.max_model_len
+        self.prefix = prefix
+
+        from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
+        self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
+
+        self.indexer_op = SparseAttnIndexer(
+            self.k_cache,
+            self.topk_tokens,
+            self.head_dim,
+            self.max_model_len,
+            self.max_total_seq_len,
+            self.topk_indices_buffer,
+        )
+
+        if Indexer._debug_log_count == 0:
+            logger.info(
+                "[Indexer] Initialized: index_topk=%d, head_dim=%d, "
+                "q_lora_rank=%d, use_fp8=False (bi150 uses bf16)",
+                self.topk_tokens, self.head_dim, q_lora_rank,
+            )
+            Indexer._debug_log_count += 1
+
+    def forward(
+        self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
+    ) -> torch.Tensor:
+        """Forward pass for indexer.
+
+        Args:
+            hidden_states: [num_tokens, hidden_size]
+            qr: [num_tokens, q_lora_rank] - q after q_a_layernorm
+            positions: [num_tokens] position indices
+            rotary_emb: RoPE embedding module
+        Returns:
+            topk_indices_buffer with top-k indices filled
+        """
+        q, _ = self.wq_b(qr)
+        q = q.view(-1, self.n_head, self.head_dim)
+        q_pe, q_nope = torch.split(
+            q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+        )
+
+        k, _ = self.wk(hidden_states)
+        k = self.k_norm(k)
+        k_pe, k_nope = torch.split(
+            k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+        )
+
+        q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+        # Note: RoPE (NeoX) can introduce extra leading dimensions during compilation
+        # so we need to reshape back to token-flattened shapes
+        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+
+        # `rotary_emb` is shape-preserving; `q_pe` is already
+        # [num_tokens, n_head, rope_dim].
+        q = torch.cat([q_pe, q_nope], dim=-1)
+        # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
+        k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+
+        # BI150: No FP8 quantization, use bf16 directly
+        # q stays as bf16: [num_tokens, n_head, head_dim]
+
+        weights, _ = self.weights_proj(hidden_states)
+        # Scale weights for attention
+        weights = weights * self.softmax_scale * (self.n_head**-0.5)
+
+        return self.indexer_op(hidden_states, q, k, weights)
 
 
 class DeepseekV2DecoderLayer(nn.Module):
@@ -542,6 +768,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: Optional[VllmConfig] = None,
+        topk_indices_buffer: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -572,6 +800,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            vllm_config=vllm_config,
+            topk_indices_buffer=topk_indices_buffer,
         )
 
         if (config.n_routed_experts is not None
@@ -646,6 +876,24 @@ class DeepseekV2Model(nn.Module):
 
         self.vocab_size = config.vocab_size
 
+        # Detect DeepSeek V3.2 and create shared topk_indices_buffer
+        self.is_v32 = hasattr(config, "index_topk")
+        if self.is_v32:
+            topk_tokens = config.index_topk
+            self.topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                topk_tokens,
+                dtype=torch.int32,
+                device=current_platform.device_type,
+            )
+            logger.info(
+                "[DeepseekV2Model] V3.2 detected: index_topk=%d, "
+                "topk_indices_buffer.shape=%s",
+                topk_tokens, self.topk_indices_buffer.shape,
+            )
+        else:
+            self.topk_indices_buffer = None
+
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -663,6 +911,8 @@ class DeepseekV2Model(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                vllm_config=vllm_config,
+                topk_indices_buffer=self.topk_indices_buffer,
             ),
             prefix=f"{prefix}.layers")
 

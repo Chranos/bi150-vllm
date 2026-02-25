@@ -11,7 +11,7 @@ import torch.distributed
 import torch.nn as nn
 
 from vllm.attention import AttentionType, get_attn_backend
-from vllm.attention.layer import Attention
+from vllm.attention.layer import Attention, AttentionLayerBase
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
@@ -1683,6 +1683,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
+                continue
+
+            # Handle non-Attention modules that implement AttentionLayerBase
+            # (e.g., DeepseekV32IndexerCache for V3.2 sparse attention)
+            if isinstance(attn_module, AttentionLayerBase) and \
+               not isinstance(attn_module, Attention):
+                if hasattr(attn_module, 'get_kv_cache_spec'):
+                    kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(
+                        self.vllm_config)
                 continue
 
             # TODO: Support other attention modules, e.g., sliding window,
