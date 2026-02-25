@@ -1008,24 +1008,36 @@ class DeepseekV2Model(nn.Module):
                 input_ids[:20] if input_ids is not None else "None",
             )
 
+        _first_nan_layer = -1
         for i, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
             hidden_states, residual = layer(positions, hidden_states, residual)
-            # Debug: check after first and last layer (once)
-            if DeepseekV2Model._debug_fwd_count == 0 and i in (0, len(self.layers) - 1):
-                logger.warning(
-                    "[DIAG layer_%d] hidden: mean=%.6f, std=%.6f, "
-                    "min=%.6f, max=%.6f, nan=%s, inf=%s | "
-                    "residual: mean=%.6f, std=%.6f",
-                    i,
-                    hidden_states.float().mean().item(),
-                    hidden_states.float().std().item(),
-                    hidden_states.float().min().item(),
-                    hidden_states.float().max().item(),
-                    torch.isnan(hidden_states).any().item(),
-                    torch.isinf(hidden_states).any().item(),
-                    residual.float().mean().item() if residual is not None else 0,
-                    residual.float().std().item() if residual is not None else 0,
-                )
+            # Debug: check every layer on first forward pass
+            if DeepseekV2Model._debug_fwd_count == 0:
+                has_nan = torch.isnan(hidden_states).any().item()
+                has_inf = torch.isinf(hidden_states).any().item()
+                if i == 0 or has_nan or has_inf or i == len(self.layers) - 1:
+                    logger.warning(
+                        "[DIAG layer_%d] hidden: mean=%.6f, std=%.6f, "
+                        "min=%.6f, max=%.6f, nan=%s, inf=%s | "
+                        "residual: nan=%s, inf=%s",
+                        i,
+                        hidden_states.float().mean().item(),
+                        hidden_states.float().std().item(),
+                        hidden_states.float().min().item(),
+                        hidden_states.float().max().item(),
+                        has_nan, has_inf,
+                        torch.isnan(residual).any().item() if residual is not None else False,
+                        torch.isinf(residual).any().item() if residual is not None else False,
+                    )
+                if has_nan and _first_nan_layer == -1:
+                    _first_nan_layer = i
+                    logger.warning(
+                        "[DIAG NaN FOUND] First NaN at layer %d! "
+                        "Checking layer type: has_mlp=%s, has_attn=%s",
+                        i,
+                        hasattr(layer, 'mlp'),
+                        hasattr(layer, 'self_attn'),
+                    )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
