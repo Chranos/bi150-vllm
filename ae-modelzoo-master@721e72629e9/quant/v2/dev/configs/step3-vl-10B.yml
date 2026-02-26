@@ -1,0 +1,53 @@
+model:
+  name: Step3-VL-10B
+  model_type: qwen3
+
+paths:
+  checkpoint_dir: /home/mashun/vllm_project/checkpoints/Step3-VL-10B
+  output_dir: /home/mashun/vllm_project/checkpoints/Step3-VL-10B-w4a8
+
+runtime:
+  num_workers: 8
+  mode: quant # dequant | dequant+quant | quant (only support bf16)
+
+quant:
+  version: 2
+  format: 
+    TN: ~
+    NN: 
+      - "re:model.layers.\\d+.mlp.down_proj.*"
+      - "re:model.layers.\\d+.mlp.gate_proj.*"
+      - "re:model.layers.\\d+.mlp.up_proj.*"
+      - "re:model.layers.\\d+.self_attn.k_proj.*"
+      - "re:model.layers.\\d+.self_attn.o_proj.*"
+      - "re:model.layers.\\d+.self_attn.q_proj.*"
+      - "re:model.layers.\\d+.self_attn.v_proj.*"
+  batch_size: 64
+  block_size: 128
+  group_size: -1
+  symmetric: True
+  class:
+    int4:
+      - "re:model.layers.\\d+.mlp.down_proj.*"
+      - "re:model.layers.\\d+.mlp.gate_proj.*"
+      - "re:model.layers.\\d+.mlp.up_proj.*"
+      - "re:model.layers.\\d+.self_attn.k_proj.*"
+      - "re:model.layers.\\d+.self_attn.o_proj.*"
+      - "re:model.layers.\\d+.self_attn.q_proj.*"
+      - "re:model.layers.\\d+.self_attn.v_proj.*"
+    int8: ~
+  ignore: 
+    # - "re:model.layers.(?:[0-9]|[1-5][0-9]|6[0-2])(?:\\..*)?$"
+    - "re:model.layers.46.*"
+    - "re:lm_head.*"
+    - "re:model.embed_tokens.*"
+    - "re:model.layers.\\d+.input_layernorm.*"
+    - "re:model.layers.\\d+.post_attention_layernorm.*"
+    - "re:model.layers.\\d+.self_attn.k_norm.*"
+    - "re:model.layers.\\d+.self_attn.q_norm.*"
+    - "re:model.norm.*"
+    - "re:vision_model.*"
+    - "re:vit_large_projector.*"
+
+dequant:
+  ignore: ~

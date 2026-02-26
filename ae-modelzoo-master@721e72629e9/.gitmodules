@@ -1,0 +1,26 @@
+[submodule "comfyui-xdit"]
+	path = comfyui-xdit
+	url = http://bitbucket.iluvatar.ai:7990/scm/~pengfei.li/comfyui-xdit.git
+	branch = master
+[submodule "bevfusion"]
+	path = bevfusion
+	url = http://bitbucket.iluvatar.ai:7990/scm/~pengfei.li/bevfusion.git
+	branch = main
+[submodule "sparsedrive"]
+	path = sparsedrive
+	url = http://bitbucket.iluvatar.ai:7990/scm/~pengfei.li/sparsedrive.git
+	branch = main
+[submodule "mineru"]
+	path = mineru
+	url = http://bitbucket.iluvatar.ai:7990/scm/~pengfei.li/mineru.git
+	branch = ILUVATAR
+[submodule "yolov7-in-one-is-all-you-need"]
+	path = yolov7-in-one-is-all-you-need
+	url = http://bitbucket.iluvatar.ai:7990/scm/~zhichao.yang/yolov7-in-one-is-all-you-need.git
+[submodule "extern/Comfyui-Diffusers"]
+	path = extern/Comfyui-Diffusers
+	url = http://bitbucket.iluvatar.ai:7990/scm/~pengfei.li/comfyui.git
+	branch = master
+[submodule "yolov7-face"]
+	path = yolov7-face
+	url = http://bitbucket.iluvatar.ai:7990/scm/aep/ae-modelzoo.git

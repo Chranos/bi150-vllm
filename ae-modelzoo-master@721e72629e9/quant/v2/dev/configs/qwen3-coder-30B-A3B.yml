@@ -1,0 +1,54 @@
+model:
+  name: Qwen3-Coder-30B-A3B-Instruct-FP8
+  model_type: qwen3_moe
+
+paths:
+  checkpoint_dir: /home/mashun/vllm_project/checkpoints/Qwen3-Coder-30B-A3B-Instruct-FP8
+  output_dir: /home/mashun/vllm_project/checkpoints/Qwen3-Coder-30B-A3B-Instruct-w4a8
+
+runtime:
+  num_workers: 8
+  mode: dequant+quant # dequant | dequant+quant | quant (only support bf16)
+
+quant:
+  version: 2
+  format: 
+    TN:
+      - "re:model.layers.\\d+.mlp.experts.\\d+.down_proj"
+      - "re:model.layers.\\d+.mlp.experts.\\d+.gate_proj"
+      - "re:model.layers.\\d+.mlp.experts.\\d+.up_proj"
+    NN: ~
+  batch_size: 64
+  block_size: 128
+  group_size: -1
+  symmetric: True
+  class:
+    int4:
+      - "re:model.layers.\\d+.mlp.experts.\\d+.down_proj"
+      - "re:model.layers.\\d+.mlp.experts.\\d+.gate_proj"
+      - "re:model.layers.\\d+.mlp.experts.\\d+.up_proj"
+    int8: ~
+  ignore: 
+    - "re:lm_head.*"
+    - "re:model.norm.*"
+    - "re:model.embed_tokens.*"
+    - "re:model.layers.\\d+.input_layernorm.*"
+    - "re:model.layers.\\d+.mlp.gate.*"
+    - "re:model.layers.\\d+.post_attention_layernorm.*"
+    - "re:model.layers.\\d+.self_attn.k_norm.*"
+    - "re:model.layers.\\d+.self_attn.k_proj.*"
+    - "re:model.layers.\\d+.self_attn.o_proj.*"
+    - "re:model.layers.\\d+.self_attn.q_norm.*"
+    - "re:model.layers.\\d+.self_attn.q_proj.*"
+    - "re:model.layers.\\d+.self_attn.v_proj.*"
+
+dequant:
+  ignore:
+    - "re:lm_head.*"
+    - "re:model.embed_tokens.*"
+    - "re:model.layers.\\d+.input_layernorm.*"
+    - "re:model.layers.\\d+.mlp.gate.*"
+    - "re:model.layers.\\d+.post_attention_layernorm.*"
+    - "re:model.layers.\\d+.self_attn.k_norm.*"
+    - "re:model.layers.\\d+.self_attn.q_norm.*"
+    - "re:model.norm.*"

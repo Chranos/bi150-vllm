@@ -1,0 +1,54 @@
+model:
+  name: Qwen3-VL-32B-Instruct
+  model_type: qwen3_vl
+
+paths:
+  checkpoint_dir: /home/mashun/vllm_project/checkpoints/Qwen3-VL-32B-Instruct
+  output_dir: /home/mashun/vllm_project/checkpoints/Qwen3-VL-32B-Instruct-w4a8
+
+runtime:
+  num_workers: 8
+  mode: quant # dequant | dequant+quant | quant (only support bf16)
+
+quant:
+  version: 2
+  format:
+    TN: ~
+    NN:
+      - "re:model.language_model.layers.\\d+.self_attn.v_proj.*"
+      - "re:model.language_model.layers.\\d+.self_attn.q_proj.*"
+      - "re:model.language_model.layers.\\d+.self_attn.k_proj.*"
+      - "re:model.language_model.layers.\\d+.self_attn.o_proj.*"
+      - "re:model.language_model.layers.\\d+.mlp.up_proj.*"
+      - "re:model.language_model.layers.\\d+.mlp.gate_proj.*"
+      - "re:model.language_model.layers.\\d+.mlp.down_proj.*"
+  batch_size: 64
+  block_size: 128
+  group_size: -1
+  symmetric: True
+  class:
+    int4:
+      - "re:model.language_model.layers.\\d+.self_attn.v_proj.*"
+      - "re:model.language_model.layers.\\d+.self_attn.q_proj.*"
+      - "re:model.language_model.layers.\\d+.self_attn.k_proj.*"
+      - "re:model.language_model.layers.\\d+.self_attn.o_proj.*"
+      - "re:model.language_model.layers.\\d+.mlp.up_proj.*"
+      - "re:model.language_model.layers.\\d+.mlp.gate_proj.*"
+      - "re:model.language_model.layers.\\d+.mlp.down_proj.*"
+    int8: ~
+  ignore: 
+    - "re:.*visual.*"
+    - "re:.*norm.*"
+    - "re:lm_head.*"
+    - "re:.*embed_tokens.*"
+
+dequant:
+  ignore:
+    - "re:lm_head.*"
+    - "re:model.embed_tokens.*"
+    - "re:model.layers.\\d+.input_layernorm.*"
+    - "re:model.layers.\\d+.mlp.gate.*"
+    - "re:model.layers.\\d+.post_attention_layernorm.*"
+    - "re:model.layers.\\d+.self_attn.k_norm.*"
+    - "re:model.layers.\\d+.self_attn.q_norm.*"
+    - "re:model.norm.*"
