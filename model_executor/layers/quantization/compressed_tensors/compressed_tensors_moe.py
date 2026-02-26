@@ -54,17 +54,28 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         input_quant = quant_config.target_scheme_map["Linear"].get(
             "input_activations")
 
+        logger.info(
+            f"[DEBUG MoE quant] get_moe_method called: "
+            f"weight_quant={weight_quant}, input_quant={input_quant}, "
+            f"activation={activation}, has_expert_map={expert_map is not None}, "
+            f"VLLM_W8A8_MOE_USE_W4A8={envs.VLLM_W8A8_MOE_USE_W4A8}")
+
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
+            logger.info("[DEBUG MoE quant] Selected: CompressedTensorsWNA16MoEMethod")
             return CompressedTensorsWNA16MoEMethod(quant_config)
         elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
               and activation == "silu" and expert_map is None):
+            logger.info("[DEBUG MoE quant] Selected: CompressedTensorsW8A8Fp8MoECutlassMethod")
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
+            logger.info("[DEBUG MoE quant] Selected: CompressedTensorsW8A8Fp8MoEMethod")
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
         elif quant_config._is_dynamic_token_w8a8(weight_quant, input_quant) or quant_config._is_static_tensor_w8a8(weight_quant, input_quant):
             if envs.VLLM_W8A8_MOE_USE_W4A8:
+                logger.info("[DEBUG MoE quant] Selected: CompressedTensorsW4A8MoEMethod")
                 return CompressedTensorsW4A8MoEMethod(quant_config)
             else:
+                logger.info("[DEBUG MoE quant] Selected: CompressedTensorsW8A8Int8MoEMethod")
                 return CompressedTensorsW8A8Int8MoEMethod(quant_config)
         else:
             raise RuntimeError(

@@ -158,26 +158,28 @@ def _initialize_model(
 
 def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                    target_device: torch.device) -> None:
-    for _, module in model.named_modules():
+    logger.info("[DEBUG] _process_weights_after_loading: starting quant processing")
+    proc_count = 0
+    for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
-            # When quant methods need to process weights after loading
-            # (for repacking, quantizing, etc), they expect parameters
-            # to be on the global target device. This scope is for the
-            # case where cpu offloading is used, where we will move the
-            # parameters onto device for processing and back off after.
+            proc_count += 1
+            if proc_count <= 3 or proc_count % 50 == 0:
+                logger.info(
+                    f"[DEBUG] process_weights_after_loading: "
+                    f"module={name}, quant_method={quant_method.__class__.__name__}, "
+                    f"count={proc_count}")
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
+    logger.info(f"[DEBUG] _process_weights_after_loading: quant done, total={proc_count}")
 
-    # Currently only used by MLA.
-    # NOTE: This intentionally happens after other modules so we can easily
-    # decompress the weights for MLA.
-    for _, module in model.named_modules():
+    logger.info("[DEBUG] _process_weights_after_loading: starting MLA processing")
+    for name, module in model.named_modules():
         if isinstance(module, Attention) and \
             hasattr(module, "process_weights_after_loading"):
-            # TODO(lucas): see if there is a way to unify the signatures
-            # of process_weights_after_loading
+            logger.info(f"[DEBUG] MLA process_weights_after_loading: {name}")
             module.process_weights_after_loading(model_config.dtype)
+    logger.info("[DEBUG] _process_weights_after_loading: all done")
 
 
 class BaseModelLoader(ABC):
@@ -437,11 +439,16 @@ class DefaultModelLoader(BaseModelLoader):
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
         target_device = torch.device(device_config.device)
+        logger.info(f"[DEBUG load_model] Stage 1: initializing model, "
+                    f"quantization={model_config.quantization}, "
+                    f"dtype={model_config.dtype}, device={target_device}")
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
+            logger.info("[DEBUG load_model] Stage 2: model initialized, starting weight loading")
 
             weights_to_load = {name for name, _ in model.named_parameters()}
+            logger.info(f"[DEBUG load_model] Total parameters to load: {len(weights_to_load)}")
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))
             self.counter_after_loading_weights = time.perf_counter()
@@ -458,7 +465,9 @@ class DefaultModelLoader(BaseModelLoader):
                         "Following weights were not initialized from "
                         f"checkpoint: {weights_not_loaded}")
 
+            logger.info("[DEBUG load_model] Stage 3: weights loaded, starting post-processing")
             _process_weights_after_loading(model, model_config, target_device)
+            logger.info("[DEBUG load_model] Stage 4: all done")
 
         return model.eval()
 

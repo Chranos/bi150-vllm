@@ -403,6 +403,8 @@ class FusedMoE(torch.nn.Module):
     # Class-level counter to limit debug logging
     _debug_log_count = 0
     _max_debug_logs = 1
+    _weight_load_count = 0
+    _weight_load_skip_count = 0
 
     def __init__(
         self,
@@ -666,7 +668,19 @@ class FusedMoE(torch.nn.Module):
 
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
+            FusedMoE._weight_load_skip_count += 1
             return
+
+        FusedMoE._weight_load_count += 1
+        total = FusedMoE._weight_load_count
+        if total == 1 or total % 500 == 0:
+            logger.info(
+                f"[DEBUG weight_loader] loaded={total}, "
+                f"skipped={FusedMoE._weight_load_skip_count}, "
+                f"current: weight_name={weight_name}, shard_id={shard_id}, "
+                f"expert_id={expert_id}, "
+                f"loaded_weight.shape={loaded_weight.shape}, "
+                f"param.shape={param.shape}")
 
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
