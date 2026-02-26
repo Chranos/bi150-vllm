@@ -1272,6 +1272,19 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
+        # ixformer kernel doesn't handle expert_ids=-1 (non-local experts
+        # in EP mode). Mask out those blocks so the kernel skips them.
+        if expert_map is not None:
+            invalid_mask = (expert_ids == -1)
+            if invalid_mask.any():
+                block_size_m = config['BLOCK_SIZE_M']
+                # Expand block-level mask to token-level mask
+                token_mask = invalid_mask.unsqueeze(1).expand(
+                    -1, block_size_m).reshape(-1)
+                token_mask = token_mask[:sorted_token_ids.shape[0]]
+                sorted_token_ids[token_mask] = curr_topk_ids.numel()
+                expert_ids[invalid_mask] = 0
+
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
                                 intermediate_cache1,
