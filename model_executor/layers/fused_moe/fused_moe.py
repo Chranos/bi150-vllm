@@ -1235,6 +1235,22 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
+    # ixformer kernel uses topk_ids to index into weight tensor B.
+    # In EP mode, topk_ids contains global expert IDs (0-255) but B only
+    # has E local experts. Remap topk_ids to local IDs and zero out
+    # weights for non-local experts so the kernel works correctly.
+    if expert_map is not None:
+        topk_ids = expert_map[topk_ids]
+        non_local_mask = (topk_ids == -1)
+        topk_ids = topk_ids.clone()
+        topk_weights = topk_weights.clone()
+        topk_ids[non_local_mask] = 0
+        topk_weights[non_local_mask] = 0.0
+        # Use local expert count for alignment, no expert_map needed
+        align_num_experts = E
+    else:
+        align_num_experts = global_num_experts
+
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1270,20 +1286,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
-                                 global_num_experts, expert_map))
-
-        # ixformer kernel doesn't handle expert_ids=-1 (non-local experts
-        # in EP mode). Mask out those blocks so the kernel skips them.
-        if expert_map is not None:
-            invalid_mask = (expert_ids == -1)
-            if invalid_mask.any():
-                block_size_m = config['BLOCK_SIZE_M']
-                # Expand block-level mask to token-level mask
-                token_mask = invalid_mask.unsqueeze(1).expand(
-                    -1, block_size_m).reshape(-1)
-                token_mask = token_mask[:sorted_token_ids.shape[0]]
-                sorted_token_ids[token_mask] = curr_topk_ids.numel()
-                expert_ids[invalid_mask] = 0
+                                 align_num_experts))
 
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
