@@ -447,7 +447,6 @@ class FusedMoE(torch.nn.Module):
         vllm_config = get_current_vllm_config()
         use_ep = (vllm_config.parallel_config.enable_expert_parallel
                   and self.tp_size > 1)
-
         # For smuggling this layer into the fused moe custom op
         # self.use_direct_call = self.dp_size == 1
         self.use_direct_call = True
@@ -483,17 +482,16 @@ class FusedMoE(torch.nn.Module):
 
         self.hidden_size = hidden_size
         self.num_experts = num_experts
-        # In EP mode, self.tp_size is already set to 1, so each rank gets
-        # the full intermediate_size for its local experts (no TP sharding).
         assert intermediate_size % self.tp_size == 0
-        self.intermediate_size_per_partition = intermediate_size // self.tp_size
+        self.intermediate_size_per_partition = (
+            intermediate_size // self.tp_size)
 
-        # Debug logging to verify EP fix (only log once)
+        # Debug logging to verify parallel config (only log once)
         if FusedMoE._debug_log_count < FusedMoE._max_debug_logs:
             logger.info(
                 f"FusedMoE: use_ep={use_ep}, local_num_experts={self.local_num_experts}, "
                 f"global_num_experts={self.global_num_experts}, ep_size={self.ep_size}, "
-                f"tp_size={self.tp_size}, "
+                f"tp_size={self.tp_size}, tp_rank={self.tp_rank}, "
                 f"intermediate_size_per_partition={self.intermediate_size_per_partition}"
             )
             FusedMoE._debug_log_count += 1
