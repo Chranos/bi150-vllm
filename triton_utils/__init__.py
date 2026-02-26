@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.triton_utils.importing import HAS_TRITON
-
-__all__ = ["HAS_TRITON"]
+from vllm.triton_utils.importing import (
+    HAS_TRITON,
+    TritonLanguagePlaceholder,
+    TritonPlaceholder,
+)
 
 if HAS_TRITON:
-    from vllm.triton_utils.custom_cache_manager import (
-        maybe_set_triton_cache_manager)
-
-    __all__ += ["maybe_set_triton_cache_manager"]
-
+    import triton
+    import triton.language as tl
+    import triton.language.extra.libdevice as tldevice
 else:
-    def maybe_set_triton_cache_manager() -> None:
-        return None
-    __all__ += ["maybe_set_triton_cache_manager"]
+    triton = TritonPlaceholder()
+    tl = TritonLanguagePlaceholder()
+    tldevice = TritonLanguagePlaceholder()
+
+__all__ = ["HAS_TRITON", "triton", "tl", "tldevice"]

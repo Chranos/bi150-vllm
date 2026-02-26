@@ -1,24 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom normalization layers."""
-from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.batch_invariant import (
+    rms_norm_batch_invariant,
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
 
 
-def is_rocm_aiter_rmsnorm_enabled() -> bool:
-    return current_platform.is_rocm() \
-        and envs.VLLM_ROCM_USE_AITER_RMSNORM \
-        and envs.VLLM_ROCM_USE_AITER
-
-
-def rms_norm(x: torch.Tensor, weight: torch.Tensor,
-             variance_epsilon: float) -> torch.Tensor:
+def rms_norm(
+    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+) -> torch.Tensor:
     from vllm import _custom_ops as ops
+
+    if vllm_is_batch_invariant():
+        return rms_norm_batch_invariant(x, weight, variance_epsilon)
     out = torch.empty_like(x)
     ops.rms_norm(
         out,
@@ -30,11 +33,19 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor,
 
 
 def fused_add_rms_norm(
-        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float, 
-        residual_alpha: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    residual_alpha: float = 1.0
+) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
-    ops.fused_add_rms_norm(
+
+    if vllm_is_batch_invariant():
+        return rms_norm_batch_invariant(
+            x + residual, weight, variance_epsilon
+        ), x + residual
+    x, residual = ops.fused_add_rms_norm(
         x,
         residual,
         weight,
@@ -44,41 +55,173 @@ def fused_add_rms_norm(
     return x, residual
 
 
-def rocm_aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor,
-                        variance_epsilon: float) -> torch.Tensor:
+def poly_norm(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, variance_epsilon: float
+) -> torch.Tensor:
+    from vllm import _custom_ops as ops
 
-    import aiter as rocm_aiter
-    return rocm_aiter.rms_norm(x, weight, variance_epsilon)
-
-
-def rocm_aiter_fused_add_rms_norm(
-        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
-
-    import aiter as rocm_aiter
-
-    # Assuming the correct signature for rmsnorm2d_fwd_with_add
-    rocm_aiter.rmsnorm2d_fwd_with_add(
-        x,  # output
-        x,  # input
-        residual,  # residual input
-        residual,  # residual output
+    out = torch.empty_like(x)
+    ops.poly_norm(
+        out,
+        x,
         weight,
+        bias,
         variance_epsilon,
     )
-    return x, residual
+    return out
 
 
-def dispatch_cuda_rmsnorm_func(add_residual: bool):
-    if add_residual:
-        if is_rocm_aiter_rmsnorm_enabled():
-            return rocm_aiter_fused_add_rms_norm
+def dispatch_rocm_rmsnorm_func(
+    with_fused_add: bool, dtype: torch.dtype, use_aiter: bool = False
+):
+    use_aiter = use_aiter and dtype in [
+        torch.float16,
+        torch.bfloat16,
+    ]
+
+    if use_aiter and with_fused_add:
+        return rocm_aiter_ops.rms_norm2d_with_add
+    if use_aiter:
+        return rocm_aiter_ops.rms_norm
+
+    # fall back to CUDA implementation
+    if with_fused_add:
         return fused_add_rms_norm
-
-    if is_rocm_aiter_rmsnorm_enabled():
-        return rocm_aiter_rms_norm
     return rms_norm
 
+  
+def rms_norm_qk(
+    input_q: torch.Tensor,
+    input_k: torch.Tensor,
+    weight_q: torch.Tensor,
+    weight_k: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm import _custom_ops as ops
+    output_q = torch.empty_like(input_q)
+    output_k = torch.empty_like(input_k)
+    ops.rms_norm_qk(
+        output_q, output_k, input_q, input_k, weight_q, weight_k, epsilon
+    )
+    return output_q, output_k
+  
+
+@CustomOp.register("rms_norm_qk")
+class RMSNormQK(CustomOp):
+    """
+    Root Mean Square Normalization for Query/Key tensors.
+
+    Computes:
+        q -> w_q * q / sqrt(E[q^2] + eps)
+        k -> w_k * k / sqrt(E[k^2] + eps)
+    """
+    def __init__(
+        self,
+        hidden_size_q: int,
+        hidden_size_k: int,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+
+        self.hidden_size_q = hidden_size_q
+        self.hidden_size_k = hidden_size_k
+        self.variance_epsilon = eps
+
+    def forward_native(
+        self,
+        input_q: torch.Tensor,
+        input_k: torch.Tensor,
+        weight_q: torch.Tensor,
+        weight_k: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if input_q.shape[-1] != self.hidden_size_q:
+            raise ValueError(
+                f"[RMSNormQK] Expected input_q last dim = {self.hidden_size_q}, "
+                f"but got {input_q.shape[-1]}"
+            )
+        if input_k.shape[-1] != self.hidden_size_k:
+            raise ValueError(
+                f"[RMSNormQK] Expected input_k last dim = {self.hidden_size_k}, "
+                f"but got {input_k.shape[-1]}"
+            )
+        if input_q.dtype != input_k.dtype:
+            raise TypeError(
+                f"[RMSNormQK] Expected input_q and input_k have same dtype, "
+                f"but got {input_q.dtype} vs {input_k.dtype}"
+            )
+
+        xq = input_q.to(torch.float32)
+        xk = input_k.to(torch.float32)
+
+        var_q = xq.pow(2).mean(dim=-1, keepdim=True)
+        var_k = xk.pow(2).mean(dim=-1, keepdim=True)
+
+        out_q = xq * torch.rsqrt(var_q + self.variance_epsilon)
+        out_k = xk * torch.rsqrt(var_k + self.variance_epsilon)
+
+        out_q = out_q * weight_q
+        out_k = out_k * weight_k
+
+        return out_q.to(input_q.dtype), out_k.to(input_k.dtype)
+   
+    def forward_cuda(
+        self,
+        input_q: torch.Tensor,
+        input_k: torch.Tensor,
+        weight_q: torch.Tensor,
+        weight_k: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if input_q.shape[-1] != self.hidden_size_q:
+            raise ValueError(
+                f"[RMSNormQK] CUDA path: Expected input_q last dim = {self.hidden_size_q}, "
+                f"but got {input_q.shape[-1]}"
+            )
+        if input_k.shape[-1] != self.hidden_size_k:
+            raise ValueError(
+                f"[RMSNormQK] CUDA path: Expected input_k last dim = {self.hidden_size_k}, "
+                f"but got {input_k.shape[-1]}"
+            )
+        if input_q.dtype != input_k.dtype:
+            raise TypeError(
+                f"[RMSNormQK] Expected input_q and input_k to have same dtype, "
+                f"but got {input_q.dtype} vs {input_k.dtype}"
+            )
+        return rms_norm_qk(
+            input_q,
+            input_k,
+            weight_q,
+            weight_k,
+            self.variance_epsilon,
+        )    
+
+    def forward_xpu(
+        self,
+        input_q: torch.Tensor,
+        input_k: torch.Tensor,
+        weight_q: torch.Tensor,
+        weight_k: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm._ipex_ops import ipex_ops as ops
+
+        out_q = ops.rms_norm(
+            input_q,
+            weight_q,
+            self.variance_epsilon,
+        )
+        out_k = ops.rms_norm(
+            input_k,
+            weight_k,
+            self.variance_epsilon,
+        )
+
+        return out_q, out_k
+
+    def extra_repr(self) -> str:
+        return (
+            f"RMSNormQK(hidden_size_q={self.hidden_size_q}, "
+            f"hidden_size_k={self.hidden_size_k}, "
+            f"eps={self.variance_epsilon}, "
+        )
 
 @CustomOp.register("rms_norm")
 class RMSNorm(CustomOp):
@@ -92,104 +235,135 @@ class RMSNorm(CustomOp):
         self,
         hidden_size: int,
         eps: float = 1e-6,
-        var_hidden_size: Optional[int] = None,
+        var_hidden_size: int | None = None,
         has_weight: bool = True,
-        dtype: Optional[torch.dtype] = None,
+        dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
 
         self.hidden_size = hidden_size
         self.variance_epsilon = eps
-        self.variance_size_override = (None if var_hidden_size == hidden_size
-                                       else var_hidden_size)
+        self.variance_size_override = (
+            None if var_hidden_size == hidden_size else var_hidden_size
+        )
+        weight_dtype = dtype or torch.get_default_dtype()
         self.has_weight = has_weight
-        if dtype is not None:
-            self.weight = torch.ones(hidden_size, dtype=dtype)
-        else:
-            self.weight = torch.ones(hidden_size)
+        self.weight = torch.ones(hidden_size, dtype=weight_dtype)
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
 
-    def forward_native(
-        self,
+        if current_platform.is_rocm():
+            aiter_rmsnorm_enabled = rocm_aiter_ops.is_rmsnorm_enabled()
+            self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
+                with_fused_add=False,
+                dtype=weight_dtype,
+                use_aiter=aiter_rmsnorm_enabled,
+            )
+            self.rocm_norm_func_with_add = dispatch_rocm_rmsnorm_func(
+                with_fused_add=True, dtype=weight_dtype, use_aiter=aiter_rmsnorm_enabled
+            )
+
+    @staticmethod
+    def forward_static(
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        variance_epsilon: float,
+        hidden_size: int,
+        orig_dtype: torch.dtype,
+        weight: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+        variance_size_override: int | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        orig_dtype = x.dtype
         x = x.to(torch.float32)
         if residual is not None:
-            x = x + residual.to(torch.float32)
+            # residual promoted f16->f32 automatically,
+            # otherwise Inductor eliminates the casts to and from f16,
+            # increasing memory usage (and complicating pattern matching)
+            x = x + residual
             residual = x.to(orig_dtype)
 
-        hidden_size = x.shape[-1]
-        if hidden_size != self.hidden_size:
-            raise ValueError("Expected hidden_size to be "
-                             f"{self.hidden_size}, but found: {hidden_size}")
+        if x.shape[-1] != hidden_size:
+            raise ValueError(
+                f"Expected hidden_size to be {hidden_size}, but found: {x.shape[-1]}"
+            )
 
-        if self.variance_size_override is None:
+        if variance_size_override is None:
             x_var = x
         else:
-            if hidden_size < self.variance_size_override:
+            if hidden_size < variance_size_override:
                 raise ValueError(
                     "Expected hidden_size to be at least "
-                    f"{self.variance_size_override}, but found: {hidden_size}")
+                    f"{variance_size_override}, but found: {hidden_size}"
+                )
 
-            x_var = x[:, :, :self.variance_size_override]
+            x_var = x[:, :, :variance_size_override]
 
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
 
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
+        x = x * torch.rsqrt(variance + variance_epsilon)
         x = x.to(orig_dtype)
-        if self.has_weight:
-            x = x * self.weight
+        if weight is not None:
+            x = x * weight
         if residual is None:
             return x
         else:
             return x, residual
 
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """PyTorch-native implementation equivalent to forward()."""
+
+        return self.forward_static(
+            x,
+            self.variance_epsilon,
+            self.hidden_size,
+            x.dtype,
+            self.weight.data if self.has_weight else None,
+            residual,
+            self.variance_size_override,
+        )
+
     def forward_cuda(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
+        residual: torch.Tensor | None = None,
         residual_alpha: float = 1.0,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
         add_residual = residual is not None
-        norm_func = dispatch_cuda_rmsnorm_func(add_residual)
-
         if add_residual:
-            return norm_func(x, residual, self.weight.data,
-                             self.variance_epsilon, residual_alpha)
+            return fused_add_rms_norm(
+                x, residual, self.weight.data, self.variance_epsilon,residual_alpha
+            )
         else:
-            return norm_func(x, self.weight.data, self.variance_epsilon)
+            return rms_norm(x, self.weight.data, self.variance_epsilon)
 
-    def forward_hpu(
+    def forward_hip(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        from vllm_hpu_extension.ops import HPUFusedRMSNorm
-        if HPUFusedRMSNorm is None:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.variance_size_override is not None:
             return self.forward_native(x, residual)
-        if residual is not None:
-            orig_shape = x.shape
-            residual += x.view(residual.shape)
-            # Note: HPUFusedRMSNorm requires 3D tensors as inputs
-            x = HPUFusedRMSNorm.apply(residual, self.weight,
-                                      self.variance_epsilon)
-            return x.view(orig_shape), residual
 
-        x = HPUFusedRMSNorm.apply(x, self.weight, self.variance_epsilon)
-        return x
+        add_residual = residual is not None
+        if add_residual:
+            return self.rocm_norm_func_with_add(
+                x, residual, self.weight.data, self.variance_epsilon
+            )
+        else:
+            return self.rocm_norm_func(x, self.weight.data, self.variance_epsilon)
 
     def forward_xpu(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
@@ -216,42 +390,6 @@ class RMSNorm(CustomOp):
 
 
 @CustomOp.register("gemma_rms_norm")
-class LayerNorm(nn.Module):
-    """Standard Layer Normalization (uses mean and variance, not RMS).
-
-    Used by DeepSeek V3.2 Indexer's k_norm layer.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-        dtype: Optional[torch.dtype] = None,
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.eps = eps
-        if dtype is not None:
-            self.weight = nn.Parameter(torch.ones(hidden_size, dtype=dtype))
-            self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=dtype))
-        else:
-            self.weight = nn.Parameter(torch.ones(hidden_size))
-            self.bias = nn.Parameter(torch.zeros(hidden_size))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply layer normalization."""
-        return torch.nn.functional.layer_norm(
-            x.float(),
-            (self.hidden_size,),
-            self.weight.float(),
-            self.bias.float(),
-            self.eps,
-        ).type_as(x)
-
-    def extra_repr(self) -> str:
-        return f"hidden_size={self.hidden_size}, eps={self.eps}"
-
-
 class GemmaRMSNorm(CustomOp):
     """RMS normalization for Gemma.
 
@@ -274,12 +412,16 @@ class GemmaRMSNorm(CustomOp):
         weight: torch.Tensor,
         variance_epsilon: float,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor],
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
         if residual is not None:
-            x = x + residual
+            x = (
+                x.float() + residual.float()
+                if orig_dtype == torch.float16
+                else x + residual
+            )
             residual = x
 
         x = x.float()
@@ -294,22 +436,143 @@ class GemmaRMSNorm(CustomOp):
     def forward_native(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        return self.forward_static(self.weight.data, self.variance_epsilon, x,
-                                   residual)
+        return self.forward_static(self.weight.data, self.variance_epsilon, x, residual)
 
     def forward_cuda(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if torch.compiler.is_compiling():
             return self.forward_native(x, residual)
 
         if not getattr(self, "_is_compiled", False):
             self.forward_static = torch.compile(  # type: ignore
-                self.forward_static)
+                self.forward_static
+            )
             self._is_compiled = True
         return self.forward_native(x, residual)
+
+
+@CustomOp.register("rms_norm_gated")
+class RMSNormGated(CustomOp):
+    """RMS Normalization with optional gating.
+
+    This is a native PyTorch implementation that supports:
+    - Standard RMS normalization
+    - Group RMS normalization
+    - Optional gating with SiLU activation
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        group_size: int | None = None,
+        norm_before_gate: bool = False,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        """Initialize RMSNormGated.
+
+        Args:
+            hidden_size: Size of the hidden dimension
+            eps: Epsilon for numerical stability
+            group_size: If not None, do GroupNorm with each group
+                        having group_size elements.
+                        group_size=None is equivalent to group_size=hidden_size
+                        (i.e. there's only 1 group).
+            norm_before_gate: If True and z is provided: out = norm(x) * silu(z)
+                              If False and z is provided: out = norm(x * silu(z))
+            device: Device to create parameters on
+            dtype: Data type for parameters
+        """
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.register_parameter("bias", None)
+        self.group_size = group_size
+        self.norm_before_gate = norm_before_gate
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
+
+    def forward_native(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """
+        Native PyTorch implementation of RMS normalization with gating.
+
+        Args:
+            x: Input tensor
+            z: Optional gating tensor
+
+        Returns:
+            Normalized (and optionally gated) tensor
+
+        If z is not None:
+            - norm_before_gate=True: out = norm(x) * silu(z)
+            - norm_before_gate=False: out = norm(x * silu(z))
+        """
+        # Apply gating before normalization if needed
+        if z is not None and not self.norm_before_gate:
+            x = x * F.silu(z)
+
+        # RMS Normalization
+        if self.group_size is None:
+            # Standard RMS norm across the last dimension
+            variance = x.pow(2).mean(dim=-1, keepdim=True)
+            x_normed = x * torch.rsqrt(variance + self.eps)
+            out = x_normed * self.weight
+        else:
+            # Group RMS norm
+            from einops import rearrange
+
+            x_group = rearrange(x, "... (g d) -> ... g d", d=self.group_size)
+            variance = x_group.pow(2).mean(dim=-1, keepdim=True)
+            x_normed = x_group * torch.rsqrt(variance + self.eps)
+            out = rearrange(x_normed, "... g d -> ... (g d)") * self.weight
+
+        # Apply gating after normalization if needed
+        if z is not None and self.norm_before_gate:
+            out = out * F.silu(z)
+
+        return out
+
+    def forward_cuda(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+
+        return rmsnorm_fn(
+            x,
+            self.weight,
+            self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
+
+
+class LayerNorm(nn.Module):
+    """
+    Layer Normalization.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor):
+        return F.layer_norm(
+            x.float(), (self.dim,), self.weight, self.bias, self.eps
+        ).type_as(x)

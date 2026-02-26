@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # copied from https://pypi.org/project/nvidia-ml-py
 # version 12.570.86
 
@@ -1021,7 +1022,7 @@ def _extractNVMLErrorsAsClasses():
     Each NVML Error gets a new NVMLError subclass. This way try,except blocks can filter appropriate
     exceptions more easily.
 
-    NVMLError is a parent class. Each NVML_ERROR_* gets it's own subclass.
+    NVMLError is a parent class. Each NVML_ERROR_* gets its own subclass.
     e.g. NVML_ERROR_ALREADY_INITIALIZED will be turned into NVMLError_AlreadyInitialized
     '''
     this_module = sys.modules[__name__]
@@ -1119,7 +1120,7 @@ class _PrintableStructure(Structure):
     e.g. class that has _field_ 'hex_value', c_uint could be formatted with
       _fmt_ = {"hex_value" : "%08X"}
     to produce nicer output.
-    Default fomratting string for all fields can be set with key "<default>" like:
+    Default formatting string for all fields can be set with key "<default>" like:
       _fmt_ = {"<default>" : "%d MHz"} # e.g all values are numbers in MHz.
     If not set it's assumed to be just "%s"
 
@@ -2416,7 +2417,7 @@ def _LoadNvmlLibrary():
                             nvmlLib = CDLL(os.path.join(os.getenv("ProgramFiles", "C:/Program Files"), "NVIDIA Corporation/NVSMI/nvml.dll"))
                     else:
                         # assume linux
-                        nvmlLib = CDLL("libnvidia-ml.so.1")
+                        nvmlLib = CDLL("libixml.so")
                 except OSError as ose:
                     _nvmlCheckReturn(NVML_ERROR_LIBRARY_NOT_FOUND)
                 if (nvmlLib == None):
@@ -3532,7 +3533,7 @@ def nvmlDeviceGetMPSComputeRunningProcesses_v3(handle):
         return []
     elif (ret == NVML_ERROR_INSUFFICIENT_SIZE):
         # typical case
-        # oversize the array incase more processes are created
+        # oversize the array in case more processes are created
         c_count.value = c_count.value * 2 + 5
         proc_array = c_nvmlProcessInfo_v3_t * c_count.value
         c_procs = proc_array()

@@ -1,28 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 
 class TokenizerBase(ABC):
-
     @property
     @abstractmethod
-    def all_special_tokens_extended(self) -> List[str]:
+    def all_special_tokens_extended(self) -> list[str]:
         raise NotImplementedError()
 
     @property
     @abstractmethod
-    def all_special_tokens(self) -> List[str]:
+    def all_special_tokens(self) -> list[str]:
         raise NotImplementedError()
 
     @property
     @abstractmethod
-    def all_special_ids(self) -> List[int]:
+    def all_special_ids(self) -> list[int]:
         raise NotImplementedError()
 
     @property
@@ -60,26 +60,31 @@ class TokenizerBase(ABC):
     def max_token_id(self) -> int:
         raise NotImplementedError()
 
+    @property
+    @abstractmethod
+    def truncation_side(self) -> str:
+        raise NotImplementedError()
+
     def __len__(self) -> int:
         return self.vocab_size
 
     @abstractmethod
     def __call__(
         self,
-        text: Union[str, List[str], List[int]],
-        text_pair: Optional[str] = None,
+        text: str | list[str] | list[int],
+        text_pair: str | None = None,
         add_special_tokens: bool = False,
         truncation: bool = False,
-        max_length: Optional[int] = None,
+        max_length: int | None = None,
     ):
         raise NotImplementedError()
 
     @abstractmethod
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         raise NotImplementedError()
 
     @abstractmethod
-    def get_added_vocab(self) -> Dict[str, int]:
+    def get_added_vocab(self) -> dict[str, int]:
         raise NotImplementedError()
 
     @abstractmethod
@@ -87,45 +92,49 @@ class TokenizerBase(ABC):
         self,
         text: str,
         truncation: bool = False,
-        max_length: Optional[int] = None,
-    ) -> List[int]:
+        max_length: int | None = None,
+    ) -> list[int]:
         raise NotImplementedError()
 
     @abstractmethod
-    def encode(self,
-               text: str,
-               add_special_tokens: Optional[bool] = None) -> List[int]:
+    def encode(
+        self,
+        text: str,
+        truncation: bool | None = None,
+        max_length: int | None = None,
+        add_special_tokens: bool | None = None,
+    ) -> list[int]:
         raise NotImplementedError()
 
     @abstractmethod
-    def apply_chat_template(self,
-                            messages: List["ChatCompletionMessageParam"],
-                            tools: Optional[List[Dict[str, Any]]] = None,
-                            **kwargs) -> List[int]:
+    def apply_chat_template(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> list[int]:
         raise NotImplementedError()
 
     @abstractmethod
-    def convert_tokens_to_string(self, tokens: List[str]) -> str:
+    def convert_tokens_to_string(self, tokens: list[str]) -> str:
         raise NotImplementedError()
 
     @abstractmethod
-    def decode(self,
-               ids: Union[List[int], int],
-               skip_special_tokens: bool = True) -> str:
+    def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
         raise NotImplementedError()
 
     @abstractmethod
     def convert_ids_to_tokens(
         self,
-        ids: List[int],
+        ids: list[int],
         skip_special_tokens: bool = True,
-    ) -> List[str]:
+    ) -> list[str]:
         raise NotImplementedError()
 
 
 class TokenizerRegistry:
     # Tokenizer name -> (tokenizer module, tokenizer class)
-    REGISTRY: Dict[str, Tuple[str, str]] = {}
+    REGISTRY: dict[str, tuple[str, str]] = {}
 
     @staticmethod
     def register(name: str, module: str, class_name: str) -> None:

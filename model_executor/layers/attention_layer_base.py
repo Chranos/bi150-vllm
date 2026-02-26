@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base class for attention-like layers."""
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+from vllm.config import VllmConfig
+from vllm.v1.kv_cache_interface import KVCacheSpec
+
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.attention.backends.abstract import AttentionBackend
-    from vllm.v1.kv_cache_interface import KVCacheSpec
 
 
 class AttentionLayerBase(ABC):
@@ -25,7 +27,7 @@ class AttentionLayerBase(ABC):
         pass
 
     @abstractmethod
-    def get_kv_cache_spec(self, vllm_config: "VllmConfig") -> "KVCacheSpec | None":
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         """
         Get the KV cache spec for this layer.
         May be None if the layer does not need KV cache.
