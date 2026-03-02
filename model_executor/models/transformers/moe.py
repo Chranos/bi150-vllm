@@ -126,6 +126,12 @@ class MoEMixin(MixtureOfExperts):
             self.ignore_unexpected_suffixes = []
         self.ignore_unexpected_suffixes.append(".e_score_correction_bias")
 
+        # Ignore extra layers that may exist in checkpoint but not in model
+        # Some checkpoints may have layer indices beyond the actual model layers
+        if not hasattr(self, 'ignore_unexpected_prefixes'):
+            self.ignore_unexpected_prefixes = []
+        self.ignore_unexpected_prefixes.append("model.layers.78")
+
     def set_eplb_state(
         self,
         expert_load_view: torch.Tensor,
