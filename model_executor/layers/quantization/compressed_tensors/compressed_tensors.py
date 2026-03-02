@@ -655,19 +655,20 @@ class CompressedTensorsConfig(QuantizationConfig):
             return None
 
         # Will be empty for models with only sparsity
-        weight_quant = input_quant = None
+        weight_quant = input_quant = format = None
         if self.target_scheme_map:
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=self.target_scheme_map.keys(),
-                fused_mapping=self.packed_modules_mapping,
-            )
+            with suppress(ValueError):
+                matched_target = find_matched_target(
+                    layer_name=layer_name,
+                    module=layer,
+                    targets=self.target_scheme_map.keys(),
+                    fused_mapping=self.packed_modules_mapping,
+                )
 
-            scheme_dict = self.target_scheme_map[matched_target]
-            weight_quant = scheme_dict.get("weights")
-            input_quant = scheme_dict.get("input_activations")
-            format = scheme_dict.get("format")
+                scheme_dict = self.target_scheme_map[matched_target]
+                weight_quant = scheme_dict.get("weights")
+                input_quant = scheme_dict.get("input_activations")
+                format = scheme_dict.get("format")
 
         # Find the sparsity scheme of the layer
         # assume that fused layers inherit first component's sparsity scheme
