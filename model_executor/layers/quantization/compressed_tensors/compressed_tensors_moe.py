@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoeWeightScaleSupported,
+    UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -110,52 +111,57 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         layer: torch.nn.Module,
         layer_name: str,
-    ) -> "CompressedTensorsMoEMethod":
+    ) -> FusedMoEMethodBase:
         # FusedMoE was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
+        unfused_names = [
+            layer_name + proj_name
+            for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
+        ]
+        # TODO: refactor this to use expert_mapping and check all layer numbers
+        all_scheme_dicts = [
+            quant_config.get_scheme_dict(layer, name) for name in unfused_names
+        ]
+        scheme_dict = all_scheme_dicts.pop()
 
-        # Debug: print target_scheme_map keys
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"[DEBUG] target_scheme_map keys: {list(quant_config.target_scheme_map.keys())}")
-        logger.info(f"[DEBUG] layer_name: {layer_name}")
+        # multiple schemes found
+        if not all([cur_dict == scheme_dict for cur_dict in all_scheme_dicts]):
+            raise ValueError(
+                "All MoE projections need to have same "
+                "quantization scheme but found multiple"
+            )
 
-        # Use FusedMoE as the matched target if it exists, otherwise fall back to Linear
-        if "FusedMoE" in quant_config.target_scheme_map:
-            matched_target = "FusedMoE"
-        elif "Linear" in quant_config.target_scheme_map:
-            matched_target = "Linear"
-        else:
-            # May have instead defined the linear layers in the fused model
-            fused_layers = ["re:.*down_proj.*", "re:.*gate_proj.*", "re:.*up_proj.*"]
-            current_scheme = None
-            for fused_layer in fused_layers:
-                # Check if one of the fused layers are defined in quant_config
-                matched_target = find_matched_target(
-                    layer_name=fused_layer,
-                    module=layer,
-                    targets=quant_config.target_scheme_map.keys(),
-                    fused_mapping=quant_config.packed_modules_mapping,
-                )
+        if scheme_dict is None:  # ignored layer
+            return UnquantizedFusedMoEMethod(layer.moe_config)
 
-                # Only valid if down_proj, gate_proj, and up_proj
-                # are mapped to the same quant scheme in the quant_config
-                if current_scheme is None:
-                    current_scheme = quant_config.target_scheme_map.get(matched_target)
-                else:
-                    assert current_scheme == quant_config.target_scheme_map.get(
-                        matched_target
-                    )
+        # TODO: @dsikka: refactor this to use schemes as other kernels
+        # are supported + check if the layer is being ignored.
+        weight_quant = scheme_dict.get("weights")
+        input_quant = scheme_dict.get("input_activations")
+        format = scheme_dict.get("format")
 
-        weight_quant = quant_config.target_scheme_map[matched_target].get("weights")
-        input_quant = quant_config.target_scheme_map[matched_target].get(
-            "input_activations"
-        )
+        if quant_config._is_mxfp4(weight_quant):
+            return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
             group_size = weight_quant.group_size or -1
+
+            valid_format_and_bits = (
+                weight_quant.num_bits in WNA16_SUPPORTED_BITS
+                and format == CompressionFormat.pack_quantized.value
+            )
+
+            if not valid_format_and_bits:
+                raise ValueError(
+                    "For Fused MoE layers, only format: ",
+                    f"{CompressionFormat.pack_quantized.value} ",
+                    f" and bits: {WNA16_SUPPORTED_BITS} is supported ",
+                    f"but got format: {CompressionFormat.pack_quantized.value} "
+                    f" and bits: {weight_quant.num_bits}",
+                )
+
             # Prefer to use the MarlinMoE kernel when it is supported.
             if (
                 not check_moe_marlin_supports_layer(layer, group_size)
@@ -189,6 +195,9 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 return CompressedTensorsW4A8MoEMethod(quant_config, layer.moe_config)
             else:
                 return CompressedTensorsW8A8Int8MoEMethod(quant_config, layer.moe_config)
+        elif quant_config._is_fp8_w4a8_sm90(weight_quant, input_quant):
+            logger.info_once("Using CompressedTensorsW4A8Fp8MoEMethod")
+            return CompressedTensorsW4A8Fp8MoEMethod(quant_config, layer.moe_config)
         elif quant_config._is_dynamic_token_w4a8_int(weight_quant, input_quant):
             return CompressedTensorsW4A8Int8MoEMethod(quant_config, layer.moe_config)
         else:
