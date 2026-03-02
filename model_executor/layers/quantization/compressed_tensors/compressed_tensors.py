@@ -812,6 +812,25 @@ class CompressedTensorsConfig(QuantizationConfig):
         return False
 
     @staticmethod
+    def _is_mxfp4(quant_args: QuantizationArgs) -> bool:
+        if quant_args is None:
+            return False
+
+        is_group_quant = quant_args.strategy == QuantizationStrategy.GROUP.value
+        is_symmetric = quant_args.symmetric
+        is_group_size_32 = quant_args.group_size == 32
+        is_float_type = quant_args.type == QuantizationType.FLOAT
+        is_4_bits = quant_args.num_bits == 4
+
+        return (
+            is_group_quant
+            and is_float_type
+            and is_4_bits
+            and is_group_size_32
+            and is_symmetric
+        )
+
+    @staticmethod
     def supports_cutlass_24(
         weight_quant: QuantizationArgs | None,
         input_quant: QuantizationArgs | None,
