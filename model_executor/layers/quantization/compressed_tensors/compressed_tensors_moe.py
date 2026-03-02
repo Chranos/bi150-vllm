@@ -109,15 +109,19 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
     def get_moe_method(
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         layer: torch.nn.Module,
+        layer_name: str,
     ) -> "CompressedTensorsMoEMethod":
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
-        # Check if a using "Linear" to select schemes
-        if "Linear" in quant_config.target_scheme_map:
+        # FusedMoE was made by combining multiple Linears so need to
+        # make sure quantization config for Linear can target it
+        quant_config._add_fused_moe_to_target_scheme_map()
+
+        # Use FusedMoE as the matched target if it exists, otherwise fall back to Linear
+        if "FusedMoE" in quant_config.target_scheme_map:
+            matched_target = "FusedMoE"
+        elif "Linear" in quant_config.target_scheme_map:
             matched_target = "Linear"
         else:
             # May have instead defined the linear layers in the fused model
-
             fused_layers = ["re:.*down_proj.*", "re:.*gate_proj.*", "re:.*up_proj.*"]
             current_scheme = None
             for fused_layer in fused_layers:

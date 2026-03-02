@@ -126,6 +126,20 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self.kv_cache_scheme is not None:
             self.kv_cache_scheme = hf_to_vllm_mapper.apply_dict(self.kv_cache_scheme)
 
+    def _add_fused_moe_to_target_scheme_map(self):
+        """
+        Helper function to update target_scheme_map
+        since linear layers get fused into FusedMoE
+        targetting 'Linear' needs to also match
+        FusedMoE modules.
+        """
+        if (
+            "Linear" not in self.target_scheme_map
+            or "FusedMoE" in self.target_scheme_map
+        ):
+            return
+        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+
     def get_quant_method(
         self,
         layer: torch.nn.Module,
@@ -158,7 +172,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod.get_moe_method(self, layer)
+            return CompressedTensorsMoEMethod.get_moe_method(self, layer, prefix)
         return None
 
     @classmethod
