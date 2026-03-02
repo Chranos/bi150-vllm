@@ -158,15 +158,21 @@ def _is_equal_or_regex_match(
     if target starts with 're:'. If check_contains is set to True,
     additionally checks if the target string is contained within the value.
     """
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
 
     if target.startswith("re:"):
         pattern = target[3:]
         if re.match(pattern, value):
+            logger.info(f"[Match Debug] regex match: value={value}, target={target}")
             return True
     elif check_contains:
-        if target.lower() in value.lower():
+        result = target.lower() in value.lower()
+        logger.info(f"[Match Debug] check_contains: value={value}, target={target}, result={result}")
+        if result:
             return True
     elif target == value:
+        logger.info(f"[Match Debug] exact match: value={value}, target={target}")
         return True
     return False
 

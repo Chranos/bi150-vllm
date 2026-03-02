@@ -777,6 +777,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Will be empty for models with only sparsity
         if self.target_scheme_map:
+            from vllm.logger import init_logger
+            logger = init_logger(__name__)
+            logger.info(f"[get_scheme_dict Debug] layer_name={layer_name}, module class={layer.__class__.__name__}, targets={list(self.target_scheme_map.keys())}")
             matched_target = find_matched_target(
                 layer_name=layer_name,
                 module=layer,
