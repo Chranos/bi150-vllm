@@ -133,12 +133,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         targetting 'Linear' needs to also match
         FusedMoE modules.
         """
+        from vllm.logger import init_logger
+        logger = init_logger(__name__)
+
+        logger.info(f"[MoE Debug] Before: target_scheme_map keys = {list(self.target_scheme_map.keys())}")
+
         # Check for both 'Linear' and prefixed versions like 'model.Linear'
         linear_key = None
         for key in self.target_scheme_map.keys():
             if key == "Linear" or key.endswith(".Linear"):
                 linear_key = key
                 break
+
+        logger.info(f"[MoE Debug] Found linear_key = {linear_key}")
 
         if linear_key is None:
             return
@@ -147,6 +154,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         fused_moe_key = linear_key.replace("Linear", "FusedMoE")
         if fused_moe_key not in self.target_scheme_map:
             self.target_scheme_map[fused_moe_key] = self.target_scheme_map[linear_key]
+            logger.info(f"[MoE Debug] Added {fused_moe_key} to target_scheme_map")
+
+        logger.info(f"[MoE Debug] After: target_scheme_map keys = {list(self.target_scheme_map.keys())}")
 
     def get_quant_method(
         self,
