@@ -187,8 +187,34 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
                 )
             )
 
+        # Memory debugging: log state before init_parameters
+        if torch.cuda.is_available():
+            device = self.device_config.device
+            mem_allocated_before = torch.cuda.memory_allocated(device) / (1024 ** 3)
+            mem_reserved_before = torch.cuda.memory_reserved(device) / (1024 ** 3)
+            mem_total = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
+            logger.info(
+                f"[Memory Debug] Before init_parameters on {device}:\n"
+                f"  Total: {mem_total:.2f} GiB, Allocated: {mem_allocated_before:.2f} GiB, "
+                f"Reserved: {mem_reserved_before:.2f} GiB, Free: {mem_total - mem_allocated_before:.2f} GiB"
+            )
+
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
+
+        # Memory debugging: log state after init_parameters
+        if torch.cuda.is_available():
+            device = self.device_config.device
+            mem_allocated_after = torch.cuda.memory_allocated(device) / (1024 ** 3)
+            mem_reserved_after = torch.cuda.memory_reserved(device) / (1024 ** 3)
+            mem_total = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
+            logger.info(
+                f"[Memory Debug] After init_parameters on {device}:\n"
+                f"  Total: {mem_total:.2f} GiB, Allocated: {mem_allocated_after:.2f} GiB, "
+                f"Reserved: {mem_reserved_after:.2f} GiB, Free: {mem_total - mem_allocated_after:.2f} GiB\n"
+                f"  Delta: Allocated +{mem_allocated_after - mem_allocated_before:.2f} GiB, "
+                f"Reserved +{mem_reserved_after - mem_reserved_before:.2f} GiB"
+            )
 
         # Pipeline parallel intermediate tensors
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -369,10 +395,31 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
             self.model: "PreTrainedModel" = AutoModel.from_config(...)
         ```
         """
+        # Memory debugging: track allocations
+        meta_params_info = []
 
         def _init_parameters(module: nn.Module, dtype: torch.dtype | None):
             for name, param in module.named_parameters(recurse=False):
                 if param.device == torch.device("meta"):
+                    # Calculate parameter size in GB
+                    param_size_bytes = param.numel() * torch.tensor([], dtype=dtype or self.model_config.dtype).element_size()
+                    param_size_gb = param_size_bytes / (1024 ** 3)
+
+                    # Get current memory stats before allocation
+                    if torch.cuda.is_available():
+                        mem_allocated_before = torch.cuda.memory_allocated(self.device_config.device) / (1024 ** 3)
+                        mem_reserved_before = torch.cuda.memory_reserved(self.device_config.device) / (1024 ** 3)
+
+                    # Store info for later logging
+                    module_name = module.__class__.__name__
+                    full_param_name = f"{module_name}.{name}"
+                    meta_params_info.append({
+                        'name': full_param_name,
+                        'shape': tuple(param.shape),
+                        'size_gb': param_size_gb,
+                        'dtype': dtype or self.model_config.dtype
+                    })
+
                     new_param = nn.Parameter(
                         torch.empty_like(
                             param.data,
@@ -385,6 +432,22 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
                 _init_parameters(child, dtype)
 
         _init_parameters(module, dtype)
+
+        # Log all meta parameters info once after initialization
+        if meta_params_info and torch.cuda.is_available():
+            total_size = sum(p['size_gb'] for p in meta_params_info)
+            mem_allocated = torch.cuda.memory_allocated(self.device_config.device) / (1024 ** 3)
+            mem_reserved = torch.cuda.memory_reserved(self.device_config.device) / (1024 ** 3)
+            mem_total = torch.cuda.get_device_properties(self.device_config.device).total_memory / (1024 ** 3)
+            mem_free = mem_total - mem_allocated
+
+            logger.info(
+                f"[Memory Debug] Initialized {len(meta_params_info)} meta parameters on {self.device_config.device}:\n"
+                f"  Total param size: {total_size:.2f} GiB\n"
+                f"  GPU memory - Total: {mem_total:.2f} GiB, Allocated: {mem_allocated:.2f} GiB, "
+                f"Reserved: {mem_reserved:.2f} GiB, Free: {mem_free:.2f} GiB\n"
+                f"  Largest params: {sorted(meta_params_info, key=lambda x: x['size_gb'], reverse=True)[:5]}"
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings()(input_ids)
