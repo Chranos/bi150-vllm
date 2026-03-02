@@ -283,6 +283,19 @@ class MoEMixin(MixtureOfExperts):
                                 # the model has shared experts, we assume there is one.
                                 self.num_shared_experts = 1
                                 break
+
+                    # Add e_score_correction_bias to gate if it doesn't exist
+                    # This is needed for models like GLM-5 that have this parameter
+                    gate = getattr(mlp, "gate", None)
+                    e_score_bias = None
+                    if gate is not None:
+                        if not hasattr(gate, "e_score_correction_bias"):
+                            # Create the parameter with proper shape
+                            gate.e_score_correction_bias = nn.Parameter(
+                                torch.empty(num_experts, dtype=torch.float32)
+                            )
+                        e_score_bias = gate.e_score_correction_bias
+
                     # Replace experts module with FusedMoE
                     fused_experts = TransformersFusedMoE(
                         num_experts=num_experts,
@@ -302,7 +315,7 @@ class MoEMixin(MixtureOfExperts):
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
                         expert_mapping=expert_mapping,
-                        e_score_correction_bias=None,
+                        e_score_correction_bias=e_score_bias,
                     )
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
