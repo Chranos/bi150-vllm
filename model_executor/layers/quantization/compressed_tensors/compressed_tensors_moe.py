@@ -115,6 +115,12 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
 
+        # Debug: print target_scheme_map keys
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[DEBUG] target_scheme_map keys: {list(quant_config.target_scheme_map.keys())}")
+        logger.info(f"[DEBUG] layer_name: {layer_name}")
+
         # Use FusedMoE as the matched target if it exists, otherwise fall back to Linear
         if "FusedMoE" in quant_config.target_scheme_map:
             matched_target = "FusedMoE"
