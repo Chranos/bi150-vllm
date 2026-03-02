@@ -158,21 +158,18 @@ def _is_equal_or_regex_match(
     if target starts with 're:'. If check_contains is set to True,
     additionally checks if the target string is contained within the value.
     """
-    from vllm.logger import init_logger
-    logger = init_logger(__name__)
-
     if target.startswith("re:"):
         pattern = target[3:]
         if re.match(pattern, value):
-            logger.info(f"[Match Debug] regex match: value={value}, target={target}")
             return True
     elif check_contains:
-        result = target.lower() in value.lower()
-        logger.info(f"[Match Debug] check_contains: value={value}, target={target}, result={result}")
-        if result:
+        # When check_contains is True, we're matching module class names
+        # Extract the class name part from target (after the last dot)
+        # e.g., 'model.TransformersFusedMoE' -> 'TransformersFusedMoE'
+        target_class_name = target.split(".")[-1]
+        if target_class_name.lower() in value.lower():
             return True
     elif target == value:
-        logger.info(f"[Match Debug] exact match: value={value}, target={target}")
         return True
     return False
 
