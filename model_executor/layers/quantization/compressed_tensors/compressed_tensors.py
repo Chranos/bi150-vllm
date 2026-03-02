@@ -738,6 +738,40 @@ class CompressedTensorsConfig(QuantizationConfig):
         logger.debug("Using scheme: %s for %s", scheme.__class__.__name__, layer_name)
         return scheme
 
+    def get_scheme_dict(
+        self, layer: torch.nn.Module, layer_name: str | None = None
+    ) -> dict[str, QuantizationArgs | str | None] | None:
+        """
+        Extract the QuantizationArgs for a given layer.
+
+        Returns:
+            dict with {
+                "weights": QuantizationArgs,
+                "input_activations": QuantizationArgs | None,
+                "format": str | None
+            } | None
+        """
+        # TODO (@kylesayrs): support ignore module names with ct matching utils
+        if should_ignore_layer(
+            layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
+        ):
+            return None
+
+        # Will be empty for models with only sparsity
+        if self.target_scheme_map:
+            matched_target = find_matched_target(
+                layer_name=layer_name,
+                module=layer,
+                targets=self.target_scheme_map.keys(),
+                fused_mapping=self.packed_modules_mapping,
+            )
+            scheme_dict = self.target_scheme_map[matched_target]
+            if scheme_dict.get("format") is None:
+                scheme_dict["format"] = self.quant_format
+            return scheme_dict
+
+        return None
+
     def get_cache_scale(self, name: str) -> str | None:
         """
         Check whether the param name matches the format for k/v cache scales
