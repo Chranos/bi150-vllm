@@ -118,15 +118,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
 
-        # Debug: print target_scheme_map keys and layer_name
-        logger.info(f"[MoE Debug] layer_name: {layer_name}")
-        logger.info(f"[MoE Debug] target_scheme_map keys: {list(quant_config.target_scheme_map.keys())}")
-
         unfused_names = [
             layer_name + proj_name
             for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
         ]
-        logger.info(f"[MoE Debug] unfused_names: {unfused_names}")
 
         # TODO: refactor this to use expert_mapping and check all layer numbers
         all_scheme_dicts = [

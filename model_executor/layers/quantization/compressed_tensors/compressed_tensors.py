@@ -133,12 +133,20 @@ class CompressedTensorsConfig(QuantizationConfig):
         targetting 'Linear' needs to also match
         FusedMoE modules.
         """
-        if (
-            "Linear" not in self.target_scheme_map
-            or "FusedMoE" in self.target_scheme_map
-        ):
+        # Check for both 'Linear' and prefixed versions like 'model.Linear'
+        linear_key = None
+        for key in self.target_scheme_map.keys():
+            if key == "Linear" or key.endswith(".Linear"):
+                linear_key = key
+                break
+
+        if linear_key is None:
             return
-        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+
+        # Add FusedMoE mapping with the same prefix
+        fused_moe_key = linear_key.replace("Linear", "FusedMoE")
+        if fused_moe_key not in self.target_scheme_map:
+            self.target_scheme_map[fused_moe_key] = self.target_scheme_map[linear_key]
 
     def get_quant_method(
         self,
