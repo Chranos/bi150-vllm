@@ -119,6 +119,13 @@ class MoEMixin(MixtureOfExperts):
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
+        # Ignore e_score_correction_bias parameter if it exists in checkpoint
+        # This parameter is used in some MoE models (e.g., GLM-5) for routing bias
+        # but is not needed for inference in vLLM's FusedMoE implementation
+        if not hasattr(self, 'ignore_unexpected_suffixes'):
+            self.ignore_unexpected_suffixes = []
+        self.ignore_unexpected_suffixes.append(".e_score_correction_bias")
+
     def set_eplb_state(
         self,
         expert_load_view: torch.Tensor,
@@ -284,19 +291,6 @@ class MoEMixin(MixtureOfExperts):
                                 self.num_shared_experts = 1
                                 break
 
-                    # Add e_score_correction_bias to gate if it doesn't exist
-                    # This is needed for models like GLM-5 that have this parameter
-                    gate = getattr(mlp, "gate", None)
-                    e_score_bias = None
-                    if gate is not None:
-                        if not hasattr(gate, "e_score_correction_bias"):
-                            # Directly modify _parameters dict to ensure proper registration
-                            param = nn.Parameter(
-                                torch.empty(num_experts, dtype=torch.float32)
-                            )
-                            gate._parameters["e_score_correction_bias"] = param
-                        e_score_bias = gate.e_score_correction_bias
-
                     # Replace experts module with FusedMoE
                     fused_experts = TransformersFusedMoE(
                         num_experts=num_experts,
@@ -316,7 +310,6 @@ class MoEMixin(MixtureOfExperts):
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
                         expert_mapping=expert_mapping,
-                        e_score_correction_bias=e_score_bias,
                     )
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
