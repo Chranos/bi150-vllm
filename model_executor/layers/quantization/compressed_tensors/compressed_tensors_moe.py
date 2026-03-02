@@ -196,7 +196,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config, layer.moe_config)
         elif quant_config._is_dynamic_token_w8a8(weight_quant, input_quant) or quant_config._is_static_tensor_w8a8(weight_quant, input_quant):
             if envs.VLLM_W8A8_MOE_USE_W4A8:
-                return CompressedTensorsW4A8MoEMethod(quant_config, layer.moe_config)
+                return CompressedTensorsW4A8MoEMethod(weight_quant, input_quant, layer.moe_config)
             else:
                 return CompressedTensorsW8A8Int8MoEMethod(quant_config, layer.moe_config)
         elif quant_config._is_fp8_w4a8_sm90(weight_quant, input_quant):
@@ -1529,15 +1529,13 @@ class CompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod):
 
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs,
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
-        self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations")
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
         self.pack_factor = 2
         self.group_size = -1 if self.weight_quant.group_size is None else self.weight_quant.group_size
         self.weight_symmetric = self.weight_quant.symmetric
