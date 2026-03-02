@@ -290,13 +290,11 @@ class MoEMixin(MixtureOfExperts):
                     e_score_bias = None
                     if gate is not None:
                         if not hasattr(gate, "e_score_correction_bias"):
-                            # Create the parameter with proper shape and register it
-                            gate.register_parameter(
-                                "e_score_correction_bias",
-                                nn.Parameter(
-                                    torch.empty(num_experts, dtype=torch.float32)
-                                ),
+                            # Directly modify _parameters dict to ensure proper registration
+                            param = nn.Parameter(
+                                torch.empty(num_experts, dtype=torch.float32)
                             )
+                            gate._parameters["e_score_correction_bias"] = param
                         e_score_bias = gate.e_score_correction_bias
 
                     # Replace experts module with FusedMoE
