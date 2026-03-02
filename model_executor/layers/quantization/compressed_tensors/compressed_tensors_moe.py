@@ -7,7 +7,11 @@ from enum import Enum
 
 import torch
 from compressed_tensors import CompressionFormat
-from compressed_tensors.quantization import ActivationOrdering, QuantizationStrategy
+from compressed_tensors.quantization import (
+    ActivationOrdering,
+    QuantizationArgs,
+    QuantizationStrategy,
+)
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
