@@ -859,17 +859,22 @@ def cutlass_scaled_mm(
         scale_b.shape * [128, 128] == b.shape
     """
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
-    assert bias is None or bias.numel() == b.shape[1] and bias.dtype == out_dtype
 
-    
     m = a.shape[0]
-    n = b.shape[1]
+    # Calculate output dimension n based on format
+    # format "TN": b is [k, n], output is [m, n]
+    # format "NN": b is [k, m] (already transposed), output is [m, n] where n = b.shape[0]
     if format == "TN":
+        n = b.shape[1]
         b = b.t()
+    else:  # format == "NN"
+        n = b.shape[0]
+
+    assert bias is None or bias.numel() == n and bias.dtype == out_dtype
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-    
+
     ops.w8a8(a, b, scale_a, scale_b, bias, format=format, output=out, out_dtype=out_dtype)
-   
+
     return out
 
 
