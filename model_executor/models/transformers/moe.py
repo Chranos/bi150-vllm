@@ -290,9 +290,12 @@ class MoEMixin(MixtureOfExperts):
                     e_score_bias = None
                     if gate is not None:
                         if not hasattr(gate, "e_score_correction_bias"):
-                            # Create the parameter with proper shape
-                            gate.e_score_correction_bias = nn.Parameter(
-                                torch.empty(num_experts, dtype=torch.float32)
+                            # Create the parameter with proper shape and register it
+                            gate.register_parameter(
+                                "e_score_correction_bias",
+                                nn.Parameter(
+                                    torch.empty(num_experts, dtype=torch.float32)
+                                ),
                             )
                         e_score_bias = gate.e_score_correction_bias
 
