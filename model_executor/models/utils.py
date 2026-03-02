@@ -310,6 +310,22 @@ class AutoWeightsLoader:
 
                     continue
 
+                # Debug: print detailed information about the missing parameter
+                logger.warning(
+                    "[Weight Loading Debug] Missing parameter: %s\n"
+                    "  base_prefix: %s\n"
+                    "  child_prefix: %s\n"
+                    "  module type: %s\n"
+                    "  Available child_modules: %s\n"
+                    "  Available child_params: %s",
+                    prefix,
+                    base_prefix,
+                    child_prefix,
+                    type(module).__name__,
+                    list(child_modules.keys()),
+                    list(child_params.keys()),
+                )
+
                 msg = (
                     f"There is no module or parameter named '{prefix}' "
                     f"in {type(self.module).__name__}"

@@ -302,6 +302,7 @@ class MoEMixin(MixtureOfExperts):
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
                         expert_mapping=expert_mapping,
+                        e_score_correction_bias=None,
                     )
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
