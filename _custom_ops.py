@@ -860,15 +860,11 @@ def cutlass_scaled_mm(
     """
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
 
+    # Weight b has already been transposed in cutlass.py's process_weights_after_loading
+    # So b is always [k, m] regardless of format
+    # a is [batch, k], b is [k, m], output is [batch, m]
     m = a.shape[0]
-    # Calculate output dimension n based on format
-    # format "TN": b is [k, n], output is [m, n]
-    # format "NN": b is [k, m] (already transposed), output is [m, n] where n = b.shape[0]
-    if format == "TN":
-        n = b.shape[1]
-        b = b.t()
-    else:  # format == "NN"
-        n = b.shape[0]
+    n = b.shape[1]
 
     assert bias is None or bias.numel() == n and bias.dtype == out_dtype
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
